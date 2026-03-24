@@ -1,5 +1,5 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use loke::poly::{DEFAULT_ERROR, polynomial_roots};
+use loke::polynomial::{DEFAULT_ERROR, find_roots};
 
 // ---------------------------------------------------------------------------
 // Deterministic PRNG — identical implementation in bench.cpp
@@ -93,11 +93,14 @@ fn bench_degree<const MDP1: usize>(c: &mut Criterion, label: &str) {
     let polys = generate_polys::<MDP1>();
 
     c.bench_function(label, |b| {
+        let mut i = 0usize;
+        let mut roots = [0.0f64; MDP1];
         b.iter(|| {
-            let mut roots = [0.0f64; MDP1];
-            for p in &polys {
-                let n = polynomial_roots(black_box(p), &mut roots, DEFAULT_ERROR);
-                black_box(n);
+            let n = find_roots(black_box(&polys[i]), &mut roots, DEFAULT_ERROR);
+            black_box(n);
+            i += 1;
+            if i >= NUM_POLYS {
+                i = 0;
             }
         });
     });
