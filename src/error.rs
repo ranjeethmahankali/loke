@@ -4,4 +4,7 @@ pub enum Error {
     InvalidParameter,
     IncorrectKnotCount,
     InsufficientControlPoints,
+    RadiusTooSmall,
+    PointsCollinear,
+    ArcCannotBeCircle,
 }

@@ -24,14 +24,14 @@ fn is_different_sign(a: f64, b: f64) -> bool {
 
 /// Evaluate polynomial using Horner's method.
 #[inline(always)]
-fn eval(coef: &[f64], x: f64) -> f64 {
+pub fn eval(coef: &[f64], x: f64) -> f64 {
     coef.iter().rev().fold(0.0, |acc, c| acc.mul_add(x, *c))
 }
 
 /// Evaluate polynomial and its derivative simultaneously using Horner's method.
 /// Returns (f(x), f'(x)). Saves N-1 multiplications vs two separate evaluations.
 #[inline(always)]
-fn eval_with_deriv(coef: &[f64], x: f64) -> (f64, f64) {
+pub fn eval_with_deriv(coef: &[f64], x: f64) -> (f64, f64) {
     let n = coef.len() - 1;
     let mut r = coef[n];
     let mut d = 0.0f64;
@@ -45,11 +45,26 @@ fn eval_with_deriv(coef: &[f64], x: f64) -> (f64, f64) {
 /// Differentiate a polynomial and write the coefficients of the derivative
 /// polynomial into `deriv`.
 #[inline(always)]
-fn differentiate(coef: &[f64], deriv: &mut [f64]) {
+pub fn differentiate(coef: &[f64], deriv: &mut [f64]) {
     let n = coef.len() - 1;
     assert_eq!(deriv.len() + 1, coef.len());
     for i in 0..n {
         deriv[i] = (i as f64 + 1.0) * coef[i + 1];
+    }
+}
+
+/// Multiply two polynomials and add the result to `sum`.
+/// `sum` must have length >= `a.len() + b.len() - 1`.
+#[inline(always)]
+pub fn mul_add(a: &[f64], b: &[f64], dst: &mut [f64]) {
+    if a.is_empty() || b.is_empty() {
+        return;
+    }
+    assert!(dst.len() >= a.len() + b.len() - 1);
+    for i in 0..a.len() {
+        for j in 0..b.len() {
+            dst[i + j] += a[i] * b[j];
+        }
     }
 }
 

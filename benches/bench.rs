@@ -96,7 +96,8 @@ fn bench_degree<const MDP1: usize>(c: &mut Criterion, label: &str) {
         let mut i = 0usize;
         let mut roots = [0.0f64; MDP1];
         b.iter(|| {
-            let n = find_roots(black_box(&polys[i]), &mut roots, DEFAULT_ERROR);
+            let n =
+                find_roots(black_box(&polys[i]), &mut roots, DEFAULT_ERROR).expect("Cannot fail");
             black_box(n);
             i += 1;
             if i >= NUM_POLYS {

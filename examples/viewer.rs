@@ -1,7 +1,8 @@
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3, Vec4Swizzles};
+use loke::arc::Arc;
 use loke::spline::Spline;
-use std::marker::PhantomData;
+use std::{marker::PhantomData, ops::Range};
 use wgpu::util::DeviceExt;
 use winit::{
     application::ApplicationHandler,
@@ -95,9 +96,9 @@ const AXIS_COLORS: [[f32; 4]; 3] = [
     [0.3, 0.3, 1.0, 1.0],
 ];
 
-const SPLINE_SAMPLES: usize = 200;
 const SPLINE_COLOR: [f32; 4] = [0.9, 0.9, 0.85, 1.0];
 const CTRL_CAGE_COLOR: [f32; 4] = [0.7, 0.35, 0.3, 0.8];
+const BBOX_COLOR: [f32; 4] = [0.35, 0.3, 0.9, 0.3];
 const POINT_COLOR: [f32; 4] = [1.0, 0.4, 0.1, 1.0];
 const INPUT_POINT_COLOR: [f32; 4] = [0.8, 0.8, 0.75, 1.0];
 
@@ -105,7 +106,12 @@ const INPUT_POINT_COLOR: [f32; 4] = [0.8, 0.8, 0.75, 1.0];
 
 trait Scene {
     fn init() -> Box<[loke::Vec3]>;
-    fn update(inputs: &[loke::Vec3], splines: &mut Vec<Spline>, points: &mut Vec<loke::Vec3>);
+    fn update(
+        inputs: &[loke::Vec3],
+        splines: &mut Vec<Spline>,
+        arcs: &mut Vec<Arc>,
+        points: &mut Vec<loke::Vec3>,
+    );
 }
 
 // ---------- Draggable point ----------
@@ -226,6 +232,7 @@ struct App<S: Scene> {
     // Scene I/O
     inputs: Box<[loke::Vec3]>,
     out_splines: Vec<Spline>,
+    out_arcs: Vec<Arc>,
     out_points: Vec<loke::Vec3>,
     // Render data built from scene outputs
     vertices: Vec<Vertex>,
@@ -250,8 +257,9 @@ impl<S: Scene> App<S> {
     fn new() -> Self {
         let inputs = S::init();
         let mut out_splines = Vec::new();
+        let mut out_arcs = Vec::new();
         let mut out_points = Vec::new();
-        S::update(&inputs, &mut out_splines, &mut out_points);
+        S::update(&inputs, &mut out_splines, &mut out_arcs, &mut out_points);
 
         let draggable = inputs
             .iter()
@@ -267,6 +275,7 @@ impl<S: Scene> App<S> {
             window: None,
             inputs,
             out_splines,
+            out_arcs,
             out_points,
             vertices: Vec::new(),
             points: Vec::new(),
@@ -306,21 +315,15 @@ impl<S: Scene> App<S> {
         self.line_strips.clear();
 
         for spline in &self.out_splines {
-            let (t0, t1) = spline.domain();
             let cps = spline.control_points();
             let start = self.vertices.len() as u32;
-
             // Solid curve (arc_len=0 → never dashed)
-            for i in 0..=SPLINE_SAMPLES {
-                let t = t0 + (t1 - t0) * (i as f64 / SPLINE_SAMPLES as f64);
-                let p = spline.eval_point(t).unwrap();
-                self.vertices.push(Vertex {
+            self.vertices
+                .extend(spline.adaptive_samples(0.001).map(|p| Vertex {
                     pos: to_glam(p).into(),
                     color: SPLINE_COLOR,
                     arc_len: 0.0,
-                });
-            }
-
+                }));
             // Control cage back to front (dashed)
             let n = cps.len();
             let mut arc = 0.0_f32;
@@ -335,9 +338,24 @@ impl<S: Scene> App<S> {
                     arc_len: arc,
                 });
             }
-
             let end = self.vertices.len() as u32;
             self.line_strips.push(start..end);
+            let (min, max) = spline.bounds();
+            rebuild_bbox(min, max, &mut self.vertices, &mut self.line_strips);
+        }
+
+        for arc in &self.out_arcs {
+            let start = self.vertices.len() as u32;
+            self.vertices
+                .extend(arc.adaptive_samples(0.001).map(|p| Vertex {
+                    pos: to_glam(p).into(),
+                    color: SPLINE_COLOR,
+                    arc_len: 0.0,
+                }));
+            let end = self.vertices.len() as u32;
+            self.line_strips.push(start..end);
+            let (min, max) = arc.bounds();
+            rebuild_bbox(min, max, &mut self.vertices, &mut self.line_strips);
         }
 
         // Input points (gizmo centers)
@@ -457,7 +475,12 @@ impl<S: Scene> App<S> {
         let id = self.draggable[pi].id;
         self.draggable[pi].position = new_pos;
         self.inputs[id] = to_loke(new_pos);
-        S::update(&self.inputs, &mut self.out_splines, &mut self.out_points);
+        S::update(
+            &self.inputs,
+            &mut self.out_splines,
+            &mut self.out_arcs,
+            &mut self.out_points,
+        );
         self.rebuild_geometry();
         self.buffers_dirty = true;
     }
@@ -469,16 +492,73 @@ impl<S: Scene> App<S> {
         self.buffers_dirty = false;
         let Some(gpu) = &mut self.gpu else { return };
         if !self.vertices.is_empty() {
-            gpu.queue
-                .write_buffer(&gpu.vertex_buf, 0, bytemuck::cast_slice(&self.vertices));
+            let data = bytemuck::cast_slice(&self.vertices);
+            if data.len() as u64 > gpu.vertex_buf.size() {
+                gpu.vertex_buf = gpu
+                    .device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("vertices"),
+                        contents: data,
+                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    });
+            } else {
+                gpu.queue.write_buffer(&gpu.vertex_buf, 0, data);
+            }
             gpu.vertex_count = self.vertices.len() as u32;
         }
         if !self.points.is_empty() {
-            gpu.queue
-                .write_buffer(&gpu.point_buf, 0, bytemuck::cast_slice(&self.points));
+            let data = bytemuck::cast_slice(&self.points);
+            if data.len() as u64 > gpu.point_buf.size() {
+                gpu.point_buf = gpu
+                    .device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("points"),
+                        contents: data,
+                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    });
+            } else {
+                gpu.queue.write_buffer(&gpu.point_buf, 0, data);
+            }
             gpu.point_count = self.points.len() as u32;
         }
     }
+}
+
+fn rebuild_bbox(
+    min: loke::Vec3,
+    max: loke::Vec3,
+    vertices: &mut Vec<Vertex>,
+    line_strips: &mut Vec<Range<u32>>,
+) {
+    let start = vertices.len() as u32;
+    vertices.extend(
+        [
+            loke::Vec3(min.0, min.1, min.2),
+            loke::Vec3(max.0, min.1, min.2),
+            loke::Vec3(max.0, max.1, min.2),
+            loke::Vec3(max.0, max.1, max.2),
+            loke::Vec3(min.0, max.1, max.2),
+            loke::Vec3(min.0, min.1, max.2),
+            loke::Vec3(max.0, min.1, max.2),
+            loke::Vec3(max.0, max.1, max.2),
+            loke::Vec3(max.0, max.1, min.2),
+            loke::Vec3(min.0, max.1, min.2),
+            loke::Vec3(min.0, min.1, min.2),
+            loke::Vec3(min.0, min.1, max.2),
+            loke::Vec3(min.0, max.1, max.2),
+            loke::Vec3(min.0, max.1, min.2),
+            loke::Vec3(max.0, max.1, min.2),
+            loke::Vec3(max.0, min.1, min.2),
+            loke::Vec3(max.0, min.1, max.2),
+        ]
+        .iter()
+        .map(|p| Vertex {
+            pos: to_glam(*p).into(),
+            color: BBOX_COLOR,
+            arc_len: 0.0,
+        }),
+    );
+    line_strips.push(start..(vertices.len() as u32));
 }
 
 // ---------- Helpers ----------
@@ -752,14 +832,22 @@ impl<S: Scene> ApplicationHandler for App<S> {
         // Buffers
         let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("vertices"),
-            contents: bytemuck::cast_slice(&self.vertices),
+            contents: if self.vertices.is_empty() {
+                &[0u8; std::mem::size_of::<Vertex>()]
+            } else {
+                bytemuck::cast_slice(&self.vertices)
+            },
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
         let vertex_count = self.vertices.len() as u32;
 
         let point_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("points"),
-            contents: bytemuck::cast_slice(&self.points),
+            contents: if self.points.is_empty() {
+                &[0u8; std::mem::size_of::<PointInstance>()]
+            } else {
+                bytemuck::cast_slice(&self.points)
+            },
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
         let point_count = self.points.len() as u32;
@@ -1007,7 +1095,6 @@ impl<S: Scene> ApplicationHandler for App<S> {
                     self.request_redraw();
                 }
             }
-
             _ => {}
         }
     }
@@ -1015,32 +1102,49 @@ impl<S: Scene> ApplicationHandler for App<S> {
 
 // ---------- Scenes ----------
 
-struct CubicSplineScene;
+struct CurveScene;
 
-impl Scene for CubicSplineScene {
+impl Scene for CurveScene {
     fn init() -> Box<[loke::Vec3]> {
         Box::new([
+            // Spline points.
             loke::Vec3(-2.0, 0.0, 0.0),
             loke::Vec3(-0.5, 2.0, 1.0),
             loke::Vec3(0.5, -2.0, 1.0),
-            loke::Vec3(2.0, 0.0, 0.0),
+            loke::Vec3(2.0, 2.0, 0.0),
+            loke::Vec3(3.5, 0.0, 0.0),
+            //Arc points.
+            loke::Vec3(-3.5, 0.0, 0.0), // start
+            loke::Vec3(-3.0, 1.5, 0.0), // middle
+            loke::Vec3(-2.5, 0.0, 0.0), // end
         ])
     }
 
-    fn update(inputs: &[loke::Vec3], splines: &mut Vec<Spline>, points: &mut Vec<loke::Vec3>) {
+    fn update(
+        inputs: &[loke::Vec3],
+        splines: &mut Vec<Spline>,
+        arcs: &mut Vec<Arc>,
+        points: &mut Vec<loke::Vec3>,
+    ) {
+        // Splines.
         splines.clear();
-        let curve = Spline::create_clamped(inputs.to_vec(), 3).unwrap();
+        let curve = Spline::create_clamped(inputs[0..5].to_vec(), 3).unwrap();
         points.clear();
         points.push({
             let (a, b) = curve.domain();
-            curve.eval_point((a + b) * 0.5).unwrap()
+            curve.point((a + b) * 0.5).unwrap()
         });
         splines.push(curve);
+        //Arcs.
+        arcs.clear();
+        if let Ok(arc) = Arc::from_three_points(inputs[5], inputs[6], inputs[7]) {
+            arcs.push(arc);
+        }
     }
 }
 
 // ---------- Entry point ----------
 
 fn main() {
-    App::<CubicSplineScene>::run();
+    App::<CurveScene>::run();
 }

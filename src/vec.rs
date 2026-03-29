@@ -3,6 +3,37 @@ use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssi
 #[derive(Default, Copy, Clone, Debug, PartialEq)]
 pub struct Vec3(pub f64, pub f64, pub f64);
 
+impl Vec3 {
+    pub fn dot(self, rhs: Self) -> f64 {
+        self.0 * rhs.0 + self.1 * rhs.1 + self.2 * rhs.2
+    }
+
+    pub fn cross(self, rhs: Self) -> Self {
+        Vec3(
+            self.1 * rhs.2 - self.2 * rhs.1,
+            self.2 * rhs.0 - self.0 * rhs.2,
+            self.0 * rhs.1 - self.1 * rhs.0,
+        )
+    }
+
+    pub fn length_sq(self) -> f64 {
+        self.dot(self)
+    }
+
+    pub fn length(self) -> f64 {
+        self.length_sq().sqrt()
+    }
+
+    pub fn normalize(self) -> Self {
+        let len = self.length();
+        if len < 1e-12 {
+            self
+        } else {
+            self / len
+        }
+    }
+}
+
 impl Add for Vec3 {
     type Output = Vec3;
 
