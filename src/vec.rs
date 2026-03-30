@@ -26,11 +26,7 @@ impl Vec3 {
 
     pub fn normalize(self) -> Self {
         let len = self.length();
-        if len < 1e-12 {
-            self
-        } else {
-            self / len
-        }
+        if len < 1e-12 { self } else { self / len }
     }
 }
 

@@ -15,11 +15,17 @@ pub struct Spline {
 impl Spline {
     /// Create a spline from explicit knots and control points.
     /// Validates that `control_points.len() + degree + 1 == knots.len()`.
-    pub fn create(
-        control_points: Vec<Vec3>,
-        knots: Vec<f64>,
+    pub fn create<Points, Knots>(
+        control_points: Points,
+        knots: Knots,
         degree: usize,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, Error>
+    where
+        Points: Into<Vec<Vec3>>,
+        Knots: Into<Vec<f64>>,
+    {
+        let control_points = control_points.into();
+        let knots = knots.into();
         if control_points.len() + degree + 1 != knots.len() {
             return Err(Error::IncorrectKnotCount);
         }
@@ -40,7 +46,11 @@ impl Spline {
 
     /// Create a clamped spline with uniform interior knots.
     /// Requires `control_points.len() >= degree + 1`.
-    pub fn create_clamped(control_points: Vec<Vec3>, degree: usize) -> Result<Self, Error> {
+    pub fn create_clamped<Points>(control_points: Points, degree: usize) -> Result<Self, Error>
+    where
+        Points: Into<Vec<Vec3>>,
+    {
+        let control_points = control_points.into();
         let nclamp = degree + 1;
         if control_points.len() < nclamp {
             return Err(Error::InsufficientControlPoints);
@@ -452,9 +462,15 @@ fn calc_basis(i: usize, u: f64, degree: usize, knots: &[f64], buf: &mut EvalBuff
         right[j] = knots[i + j] - u;
         let mut saved = 0.0f64;
         for r in 0..j {
-            let temp = basis[r] / (right[r + 1] + left[j - r]);
-            basis[r] = saved + right[r + 1] * temp;
-            saved = left[j - r] * temp;
+            // This part is rewritten a little differently from the book to
+            // improve floating point accuracy. As a consequence it also resuled
+            // in a small performance improvement as per early benchmarks.
+            let denom = right[r + 1] + left[j - r];
+            let right_frac = right[r + 1] / denom;
+            let left_frac = left[j - r] / denom;
+            let old = basis[r];
+            basis[r] = saved + old * right_frac;
+            saved = old * left_frac;
         }
         basis[j] = saved;
     }
@@ -492,10 +508,16 @@ fn calc_ders_basis(
         right[j] = knots[span + j] - u;
         let mut saved = 0.0_f64;
         for r in 0..j {
-            ndu[j][r] = right[r + 1] + left[j - r];
-            let temp = ndu[r][j - 1] / ndu[j][r];
-            ndu[r][j] = saved + right[r + 1] * temp;
-            saved = left[j - r] * temp;
+            // This part is rewritten a little differently from the book to
+            // improve floating point accuracy. As a consequence it also resuled
+            // in a small performance improvement as per early benchmarks.
+            let denom = right[r + 1] + left[j - r];
+            ndu[j][r] = denom;
+            let right_frac = right[r + 1] / denom;
+            let left_frac = left[j - r] / denom;
+            let old = ndu[r][j - 1];
+            ndu[r][j] = saved + old * right_frac;
+            saved = old * left_frac;
         }
         ndu[j][j] = saved;
     }
@@ -715,6 +737,7 @@ pub(crate) fn binomial_coeff(n: usize, k: usize) -> usize {
 mod test {
     use super::*;
     use crate::polynomial;
+    use rand::{RngExt, SeedableRng, rngs::StdRng};
 
     #[test]
     fn t_binomial_coefficients() {
@@ -793,17 +816,17 @@ mod test {
 
     #[test]
     fn t_create_validates_knot_count() {
-        let cps = vec![Vec3(0., 0., 0.), Vec3(1., 0., 0.), Vec3(2., 0., 0.)];
+        let cps = [Vec3(0., 0., 0.), Vec3(1., 0., 0.), Vec3(2., 0., 0.)];
         // Correct: 3 cps + degree 2 + 1 = 6 knots.
-        assert!(Spline::create(cps.clone(), vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0], 2,).is_ok());
+        assert!(Spline::create(&cps, &[0.0, 0.0, 0.0, 1.0, 1.0, 1.0], 2,).is_ok());
         // Too few knots.
         assert!(matches!(
-            Spline::create(cps.clone(), vec![0.0, 0.0, 0.0, 1.0, 1.0], 2),
+            Spline::create(&cps, &[0.0, 0.0, 0.0, 1.0, 1.0], 2),
             Err(Error::IncorrectKnotCount)
         ));
         // Too many knots.
         assert!(matches!(
-            Spline::create(cps, vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0], 2),
+            Spline::create(&cps, &[0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0], 2),
             Err(Error::IncorrectKnotCount)
         ));
     }
@@ -812,20 +835,18 @@ mod test {
     fn t_create_clamped_validates_control_points() {
         // Degree 2 requires at least 3 control points.
         assert!(matches!(
-            Spline::create_clamped(vec![Vec3(0., 0., 0.), Vec3(1., 0., 0.)], 2),
+            Spline::create_clamped(&[Vec3(0., 0., 0.), Vec3(1., 0., 0.)], 2),
             Err(Error::InsufficientControlPoints)
         ));
         // Degree 0 with empty control points.
         assert!(matches!(
-            Spline::create_clamped(vec![], 0),
+            Spline::create_clamped(&[], 0),
             Err(Error::InsufficientControlPoints)
         ));
         // Exactly enough.
-        let spline = Spline::create_clamped(
-            vec![Vec3(0., 0., 0.), Vec3(1., 2., 0.), Vec3(2., 0., 0.)],
-            2,
-        )
-        .unwrap();
+        let spline =
+            Spline::create_clamped(&[Vec3(0., 0., 0.), Vec3(1., 2., 0.), Vec3(2., 0., 0.)], 2)
+                .unwrap();
         assert_eq!(spline.degree(), 2);
         assert_eq!(spline.domain(), (0.0, 1.0));
     }
@@ -834,14 +855,20 @@ mod test {
     fn t_create_clamped_knot_generation() {
         // 7 control points, degree 3: nclamp=4, ntotal=11, nmiddle=3
         // Expected knots: [0,0,0,0, 1,2,3, 4,4,4,4]
-        let cps: Vec<Vec3> = (0..7).map(|i| Vec3(i as f64, 0., 0.)).collect();
-        let spline = Spline::create_clamped(cps, 3).unwrap();
+        let spline = Spline::create_clamped(
+            (0..7).map(|i| Vec3(i as f64, 0., 0.)).collect::<Vec<_>>(),
+            3,
+        )
+        .unwrap();
         assert_eq!(spline.degree(), 3);
         assert_eq!(spline.domain(), (0.0, 4.0));
         // 4 control points, degree 1: nclamp=2, ntotal=6, nmiddle=2
         // Expected knots: [0,0, 1,2, 3,3]
-        let cps: Vec<Vec3> = (0..4).map(|i| Vec3(i as f64, 0., 0.)).collect();
-        let spline = Spline::create_clamped(cps, 1).unwrap();
+        let spline = Spline::create_clamped(
+            (0..4).map(|i| Vec3(i as f64, 0., 0.)).collect::<Vec<_>>(),
+            1,
+        )
+        .unwrap();
         assert_eq!(spline.degree(), 1);
         assert_eq!(spline.domain(), (0.0, 3.0));
     }
@@ -850,13 +877,13 @@ mod test {
     fn t_start_end_linear() {
         // Degree 1: start/end should be the first/last control points.
         let spline = Spline::create(
-            vec![
+            &[
                 Vec3(0., 0., 0.),
                 Vec3(1., 3., 0.),
                 Vec3(3., 1., 0.),
                 Vec3(4., 4., 0.),
             ],
-            vec![0.0, 0.0, 1.0, 2.0, 3.0, 3.0],
+            &[0.0, 0.0, 1.0, 2.0, 3.0, 3.0],
             1,
         )
         .unwrap();
@@ -868,8 +895,8 @@ mod test {
     fn t_start_end_quadratic_bezier() {
         // Single-span quadratic Bézier.
         let spline = Spline::create(
-            vec![Vec3(0., 0., 0.), Vec3(1., 2., 0.), Vec3(2., 0., 0.)],
-            vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            &[Vec3(0., 0., 0.), Vec3(1., 2., 0.), Vec3(2., 0., 0.)],
+            &[0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
             2,
         )
         .unwrap();
@@ -881,13 +908,13 @@ mod test {
     fn t_start_end_cubic_bezier() {
         // Single-span cubic Bézier.
         let spline = Spline::create(
-            vec![
+            &[
                 Vec3(0., 0., 0.),
                 Vec3(0., 1., 0.),
                 Vec3(1., 1., 0.),
                 Vec3(1., 0., 0.),
             ],
-            vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+            &[0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
             3,
         )
         .unwrap();
@@ -899,7 +926,7 @@ mod test {
     fn t_start_end_clamped_cubic_multi_segment() {
         // Clamped cubic with multiple segments and 3D control points.
         let spline = Spline::create(
-            vec![
+            &[
                 Vec3(1., 2., 3.),
                 Vec3(4., 5., 6.),
                 Vec3(7., 8., 9.),
@@ -908,7 +935,7 @@ mod test {
                 Vec3(16., 17., 18.),
                 Vec3(19., 20., 21.),
             ],
-            vec![0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 4.0, 4.0, 4.0],
+            &[0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 4.0, 4.0, 4.0],
             3,
         )
         .unwrap();
@@ -920,14 +947,11 @@ mod test {
     fn t_start_end_matches_eval_point() {
         // Verify start()/end() agree with eval_point at domain boundaries
         // for several splines created with create_clamped.
-        for (cps, degree) in [
-            (vec![Vec3(0., 0., 0.), Vec3(1., 1., 1.)], 1),
+        let cases: [(&[Vec3], usize); _] = [
+            (&[Vec3(0., 0., 0.), Vec3(1., 1., 1.)], 1),
+            (&[Vec3(0., 0., 0.), Vec3(1., 2., 0.), Vec3(2., 0., 0.)], 2),
             (
-                vec![Vec3(0., 0., 0.), Vec3(1., 2., 0.), Vec3(2., 0., 0.)],
-                2,
-            ),
-            (
-                vec![
+                &[
                     Vec3(0., 0., 0.),
                     Vec3(1., 5., -2.),
                     Vec3(2., -3., 4.),
@@ -936,7 +960,8 @@ mod test {
                 ],
                 3,
             ),
-        ] {
+        ];
+        for (cps, degree) in cases {
             let spline = Spline::create_clamped(cps, degree).unwrap();
             let (dom_start, dom_end) = spline.domain();
             assert_eq!(spline.start(), spline.point(dom_start).unwrap());
@@ -948,7 +973,7 @@ mod test {
     fn t_eval_point_out_of_domain() {
         // Clamped cubic, domain [0.0, 4.0]
         let spline = Spline::create(
-            vec![
+            &[
                 Vec3(0., 0., 0.),
                 Vec3(1., 2., 0.),
                 Vec3(2., 0., 0.),
@@ -957,7 +982,7 @@ mod test {
                 Vec3(5., 2., 0.),
                 Vec3(6., 0., 0.),
             ],
-            vec![0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 4.0, 4.0, 4.0],
+            &[0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 4.0, 4.0, 4.0],
             3,
         )
         .unwrap();
@@ -982,13 +1007,13 @@ mod test {
         // and linearly interpolates between them.
         // knots [0,0,1,2,3,3], 4 control points, domain [0,3].
         let spline = Spline::create(
-            vec![
+            &[
                 Vec3(0., 0., 0.),
                 Vec3(1., 3., 0.),
                 Vec3(3., 1., 0.),
                 Vec3(4., 4., 0.),
             ],
-            vec![0.0, 0.0, 1.0, 2.0, 3.0, 3.0],
+            &[0.0, 0.0, 1.0, 2.0, 3.0, 3.0],
             1,
         )
         .unwrap();
@@ -1008,8 +1033,8 @@ mod test {
         // Single-span quadratic Bezier: C(t) = (1-t)^2 P0 + 2t(1-t) P1 + t^2 P2
         // knots [0,0,0,1,1,1], 3 control points, domain [0,1].
         let spline = Spline::create(
-            vec![Vec3(0., 0., 0.), Vec3(1., 2., 0.), Vec3(2., 0., 0.)],
-            vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            &[Vec3(0., 0., 0.), Vec3(1., 2., 0.), Vec3(2., 0., 0.)],
+            &[0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
             2,
         )
         .unwrap();
@@ -1029,13 +1054,13 @@ mod test {
         // Single-span cubic Bezier: C(t) = (1-t)^3 P0 + 3t(1-t)^2 P1 + 3t^2(1-t) P2 + t^3 P3
         // knots [0,0,0,0,1,1,1,1], 4 control points, domain [0,1].
         let spline = Spline::create(
-            vec![
+            &[
                 Vec3(0., 0., 0.),
                 Vec3(0., 1., 0.),
                 Vec3(1., 1., 0.),
                 Vec3(1., 0., 0.),
             ],
-            vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+            &[0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
             3,
         )
         .unwrap();
@@ -1051,7 +1076,7 @@ mod test {
     #[test]
     fn t_eval_derivs_out_of_domain() {
         let spline = Spline::create(
-            vec![
+            &[
                 Vec3(0., 0., 0.),
                 Vec3(1., 2., 0.),
                 Vec3(2., 0., 0.),
@@ -1060,7 +1085,7 @@ mod test {
                 Vec3(5., 2., 0.),
                 Vec3(6., 0., 0.),
             ],
-            vec![0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 4.0, 4.0, 4.0],
+            &[0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 4.0, 4.0, 4.0],
             3,
         )
         .unwrap();
@@ -1076,13 +1101,13 @@ mod test {
     fn t_eval_derivs_linear() {
         // Degree 1: piecewise linear. The derivative is constant within each span.
         let spline = Spline::create(
-            vec![
+            &[
                 Vec3(0., 0., 0.),
                 Vec3(1., 3., 0.),
                 Vec3(3., 1., 0.),
                 Vec3(4., 4., 0.),
             ],
-            vec![0.0, 0.0, 1.0, 2.0, 3.0, 3.0],
+            &[0.0, 0.0, 1.0, 2.0, 3.0, 3.0],
             1,
         )
         .unwrap();
@@ -1113,8 +1138,7 @@ mod test {
         let p0 = Vec3(0., 0., 0.);
         let p1 = Vec3(1., 2., 0.);
         let p2 = Vec3(2., 0., 0.);
-        let spline =
-            Spline::create(vec![p0, p1, p2], vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0], 2).unwrap();
+        let spline = Spline::create(&[p0, p1, p2], &[0.0, 0.0, 0.0, 1.0, 1.0, 1.0], 2).unwrap();
         let mut results = [Vec3(0., 0., 0.); 3];
         // At t=0: C'(0) = 2(P1-P0) = (2,4,0), C''(0) = 2(P2-2P1+P0) = (0,-8,0)
         spline.point_with_derivs(0.0, &mut results).unwrap();
@@ -1143,13 +1167,13 @@ mod test {
         // C(t) = (1-t)^3 P0 + 3t(1-t)^2 P1 + 3t^2(1-t) P2 + t^3 P3
         // C'(t) = 3[(1-t)^2(P1-P0) + 2t(1-t)(P2-P1) + t^2(P3-P2)]
         let spline = Spline::create(
-            vec![
+            &[
                 Vec3(0., 0., 0.),
                 Vec3(0., 1., 0.),
                 Vec3(1., 1., 0.),
                 Vec3(1., 0., 0.),
             ],
-            vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+            &[0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
             3,
         )
         .unwrap();
@@ -1174,8 +1198,8 @@ mod test {
     fn t_eval_tangent_out_of_domain() {
         // Degree 1, domain [0, 2].
         let spline = Spline::create(
-            vec![Vec3(0., 0., 0.), Vec3(1., 1., 0.), Vec3(3., 0., 0.)],
-            vec![0.0, 0.0, 1.0, 2.0, 2.0],
+            &[Vec3(0., 0., 0.), Vec3(1., 1., 0.), Vec3(3., 0., 0.)],
+            &[0.0, 0.0, 1.0, 2.0, 2.0],
             1,
         )
         .unwrap();
@@ -1189,8 +1213,8 @@ mod test {
         // Degree 1: tangent within each span equals the difference of adjacent control points.
         // P0=(0,0,0), P1=(2,6,0), P2=(5,3,0)  knots [0,0,1,2,2]
         let spline = Spline::create(
-            vec![Vec3(0., 0., 0.), Vec3(2., 6., 0.), Vec3(5., 3., 0.)],
-            vec![0.0, 0.0, 1.0, 2.0, 2.0],
+            &[Vec3(0., 0., 0.), Vec3(2., 6., 0.), Vec3(5., 3., 0.)],
+            &[0.0, 0.0, 1.0, 2.0, 2.0],
             1,
         )
         .unwrap();
@@ -1208,8 +1232,8 @@ mod test {
         // C'(t) = 2[(1-t)(P1-P0) + t(P2-P1)]
         //       = 2[(1-t)(0,1,0) + t(-1,0,0)]
         let spline = Spline::create(
-            vec![Vec3(1., 0., 0.), Vec3(1., 1., 0.), Vec3(0., 1., 0.)],
-            vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            &[Vec3(1., 0., 0.), Vec3(1., 1., 0.), Vec3(0., 1., 0.)],
+            &[0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
             2,
         )
         .unwrap();
@@ -1229,13 +1253,13 @@ mod test {
         // C'(t) = 3[(1-t)^2(P1-P0) + 2t(1-t)(P2-P1) + t^2(P3-P2)]
         //       = 3[(1-t)^2(1,0,0) + 2t(1-t)(0,1,0) + t^2(-1,0,0)]
         let spline = Spline::create(
-            vec![
+            &[
                 Vec3(0., 0., 0.),
                 Vec3(1., 0., 0.),
                 Vec3(1., 1., 0.),
                 Vec3(0., 1., 0.),
             ],
-            vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+            &[0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
             3,
         )
         .unwrap();
@@ -1252,7 +1276,7 @@ mod test {
     fn t_eval_point_clamped_cubic_endpoints() {
         // Clamped cubic always passes through first and last control points.
         let spline = Spline::create(
-            vec![
+            &[
                 Vec3(1., 2., 3.),
                 Vec3(4., 5., 6.),
                 Vec3(7., 8., 9.),
@@ -1261,7 +1285,7 @@ mod test {
                 Vec3(16., 17., 18.),
                 Vec3(19., 20., 21.),
             ],
-            vec![0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 4.0, 4.0, 4.0],
+            &[0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 4.0, 4.0, 4.0],
             3,
         )
         .unwrap();
@@ -1321,8 +1345,8 @@ mod test {
         // --- Single segment cases: Bézier CPs should equal the original CPs ---
         // Degree 1, single segment (2 CPs).
         let spline = Spline::create(
-            vec![Vec3(0., 0., 0.), Vec3(3., 4., 0.)],
-            vec![0.0, 0.0, 1.0, 1.0],
+            &[Vec3(0., 0., 0.), Vec3(3., 4., 0.)],
+            &[0.0, 0.0, 1.0, 1.0],
             1,
         )
         .unwrap();
@@ -1334,8 +1358,8 @@ mod test {
         check_bezier_decomposition(&spline);
         // Degree 2, single segment (3 CPs). Bézier CPs == original CPs.
         let spline = Spline::create(
-            vec![Vec3(0., 0., 0.), Vec3(1., 2., 0.), Vec3(2., 0., 0.)],
-            vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            &[Vec3(0., 0., 0.), Vec3(1., 2., 0.), Vec3(2., 0., 0.)],
+            &[0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
             2,
         )
         .unwrap();
@@ -1347,13 +1371,13 @@ mod test {
         check_bezier_decomposition(&spline);
         // Degree 3, single segment (4 CPs). Bézier CPs == original CPs.
         let spline = Spline::create(
-            vec![
+            &[
                 Vec3(0., 0., 0.),
                 Vec3(0., 1., 0.),
                 Vec3(1., 1., 0.),
                 Vec3(1., 0., 0.),
             ],
-            vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+            &[0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
             3,
         )
         .unwrap();
@@ -1367,13 +1391,13 @@ mod test {
         // --- Multi-segment cases ---
         // Degree 1, 4 CPs, 3 segments. Each segment is a line between consecutive CPs.
         let spline = Spline::create(
-            vec![
+            &[
                 Vec3(0., 0., 0.),
                 Vec3(1., 3., 0.),
                 Vec3(3., 1., 0.),
                 Vec3(4., 4., 0.),
             ],
-            vec![0.0, 0.0, 1.0, 2.0, 3.0, 3.0],
+            &[0.0, 0.0, 1.0, 2.0, 3.0, 3.0],
             1,
         )
         .unwrap();
@@ -1391,7 +1415,7 @@ mod test {
         check_bezier_decomposition(&spline);
         // Degree 3, 7 CPs, 4 segments, uniform clamped.
         let spline = Spline::create(
-            vec![
+            &[
                 Vec3(0., 0., 0.),
                 Vec3(1., 2., 0.),
                 Vec3(2., -1., 3.),
@@ -1400,7 +1424,7 @@ mod test {
                 Vec3(5., 3., 2.),
                 Vec3(6., 1., 0.),
             ],
-            vec![0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 4.0, 4.0, 4.0],
+            &[0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 4.0, 4.0, 4.0],
             3,
         )
         .unwrap();
@@ -1423,7 +1447,7 @@ mod test {
         check_bezier_decomposition(&spline);
         // Degree 2, 5 CPs, 3 segments, uniform clamped.
         let spline = Spline::create_clamped(
-            vec![
+            &[
                 Vec3(0., 0., 0.),
                 Vec3(1., 4., 0.),
                 Vec3(3., -2., 1.),
@@ -1452,7 +1476,7 @@ mod test {
         // Degree 3, interior knot at u=1 with multiplicity 2.
         // 6 CPs, knots [0,0,0,0, 1,1, 2,2,2,2] => 2 segments.
         let spline = Spline::create(
-            vec![
+            &[
                 Vec3(0., 0., 0.),
                 Vec3(1., 3., 0.),
                 Vec3(2., 0., 1.),
@@ -1460,7 +1484,7 @@ mod test {
                 Vec3(4., -1., 2.),
                 Vec3(5., 1., 0.),
             ],
-            vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0],
+            &[0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0],
             3,
         )
         .unwrap();
@@ -1472,7 +1496,7 @@ mod test {
         check_bezier_decomposition(&spline);
         // --- 3D control points with all nonzero components ---
         let spline = Spline::create(
-            vec![
+            &[
                 Vec3(1., 2., 3.),
                 Vec3(4., 5., 6.),
                 Vec3(7., 8., 9.),
@@ -1481,7 +1505,7 @@ mod test {
                 Vec3(16., 17., 18.),
                 Vec3(19., 20., 21.),
             ],
-            vec![0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 4.0, 4.0, 4.0],
+            &[0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 4.0, 4.0, 4.0],
             3,
         )
         .unwrap();
@@ -1489,7 +1513,7 @@ mod test {
         // --- Non-uniform interior knots ---
         // Degree 3, 6 CPs, knots [0,0,0,0, 0.3, 0.7, 1,1,1,1] => 3 segments.
         let spline = Spline::create(
-            vec![
+            &[
                 Vec3(0., 0., 0.),
                 Vec3(0.5, 2., 1.),
                 Vec3(1.5, -1., 2.),
@@ -1497,7 +1521,7 @@ mod test {
                 Vec3(3.5, 0., 1.),
                 Vec3(4., 1., 0.),
             ],
-            vec![0.0, 0.0, 0.0, 0.0, 0.3, 0.7, 1.0, 1.0, 1.0, 1.0],
+            &[0.0, 0.0, 0.0, 0.0, 0.3, 0.7, 1.0, 1.0, 1.0, 1.0],
             3,
         )
         .unwrap();
@@ -1506,8 +1530,8 @@ mod test {
         check_bezier_decomposition(&spline);
         // --- Reuse of dst vector (ensure clear works) ---
         let spline_small = Spline::create(
-            vec![Vec3(0., 0., 0.), Vec3(1., 1., 1.)],
-            vec![0.0, 0.0, 1.0, 1.0],
+            &[Vec3(0., 0., 0.), Vec3(1., 1., 1.)],
+            &[0.0, 0.0, 1.0, 1.0],
             1,
         )
         .unwrap();
@@ -1595,8 +1619,8 @@ mod test {
         // Single segment, degree 1.
         check_power_basis(
             &Spline::create(
-                vec![Vec3(0., 0., 0.), Vec3(3., 4., 5.)],
-                vec![0.0, 0.0, 1.0, 1.0],
+                &[Vec3(0., 0., 0.), Vec3(3., 4., 5.)],
+                &[0.0, 0.0, 1.0, 1.0],
                 1,
             )
             .unwrap(),
@@ -1604,8 +1628,8 @@ mod test {
         // Single segment, degree 2.
         check_power_basis(
             &Spline::create(
-                vec![Vec3(0., 0., 0.), Vec3(1., 2., 0.), Vec3(2., 0., 0.)],
-                vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+                &[Vec3(0., 0., 0.), Vec3(1., 2., 0.), Vec3(2., 0., 0.)],
+                &[0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
                 2,
             )
             .unwrap(),
@@ -1613,13 +1637,13 @@ mod test {
         // Single segment, degree 3.
         check_power_basis(
             &Spline::create(
-                vec![
+                &[
                     Vec3(0., 0., 0.),
                     Vec3(0., 1., 0.),
                     Vec3(1., 1., 0.),
                     Vec3(1., 0., 0.),
                 ],
-                vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+                &[0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
                 3,
             )
             .unwrap(),
@@ -1627,7 +1651,7 @@ mod test {
         // Multi-segment cubic, uniform clamped.
         check_power_basis(
             &Spline::create(
-                vec![
+                &[
                     Vec3(0., 0., 0.),
                     Vec3(1., 2., 0.),
                     Vec3(2., -1., 3.),
@@ -1636,7 +1660,7 @@ mod test {
                     Vec3(5., 3., 2.),
                     Vec3(6., 1., 0.),
                 ],
-                vec![0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 4.0, 4.0, 4.0],
+                &[0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 4.0, 4.0, 4.0],
                 3,
             )
             .unwrap(),
@@ -1644,7 +1668,7 @@ mod test {
         // Multi-segment quadratic, clamped.
         check_power_basis(
             &Spline::create_clamped(
-                vec![
+                &[
                     Vec3(0., 0., 0.),
                     Vec3(1., 4., 0.),
                     Vec3(3., -2., 1.),
@@ -1658,7 +1682,7 @@ mod test {
         // Non-uniform interior knots, degree 3.
         check_power_basis(
             &Spline::create(
-                vec![
+                &[
                     Vec3(0., 0., 0.),
                     Vec3(0.5, 2., 1.),
                     Vec3(1.5, -1., 2.),
@@ -1666,7 +1690,7 @@ mod test {
                     Vec3(3.5, 0., 1.),
                     Vec3(4., 1., 0.),
                 ],
-                vec![0.0, 0.0, 0.0, 0.0, 0.3, 0.7, 1.0, 1.0, 1.0, 1.0],
+                &[0.0, 0.0, 0.0, 0.0, 0.3, 0.7, 1.0, 1.0, 1.0, 1.0],
                 3,
             )
             .unwrap(),
@@ -1674,7 +1698,7 @@ mod test {
         // Interior knot with multiplicity 2, degree 3.
         check_power_basis(
             &Spline::create(
-                vec![
+                &[
                     Vec3(0., 0., 0.),
                     Vec3(1., 3., 0.),
                     Vec3(2., 0., 1.),
@@ -1682,7 +1706,7 @@ mod test {
                     Vec3(4., -1., 2.),
                     Vec3(5., 1., 0.),
                 ],
-                vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0],
+                &[0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0],
                 3,
             )
             .unwrap(),
@@ -1690,7 +1714,7 @@ mod test {
         // 3D control points with all nonzero components.
         check_power_basis(
             &Spline::create(
-                vec![
+                &[
                     Vec3(1., 2., 3.),
                     Vec3(4., 5., 6.),
                     Vec3(7., 8., 9.),
@@ -1699,7 +1723,7 @@ mod test {
                     Vec3(16., 17., 18.),
                     Vec3(19., 20., 21.),
                 ],
-                vec![0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 4.0, 4.0, 4.0],
+                &[0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 4.0, 4.0, 4.0],
                 3,
             )
             .unwrap(),
@@ -1758,8 +1782,8 @@ mod test {
     fn bounds_degree_0() {
         // Three constant segments with values 1, 5, 2 in x; y and z are 0.
         let spline = Spline::create(
-            vec![Vec3(1., 0., 0.), Vec3(5., 0., 0.), Vec3(2., 0., 0.)],
-            vec![0.0, 1.0, 2.0, 3.0],
+            &[Vec3(1., 0., 0.), Vec3(5., 0., 0.), Vec3(2., 0., 0.)],
+            &[0.0, 1.0, 2.0, 3.0],
             0,
         )
         .unwrap();
@@ -1767,7 +1791,7 @@ mod test {
         assert_eq!(lo.0, 1.0); // min x
         assert_eq!(hi.0, 5.0); // max x
         // Single control point: degenerate case.
-        let spline = Spline::create(vec![Vec3(3., 7., -2.)], vec![0.0, 1.0], 0).unwrap();
+        let spline = Spline::create(&[Vec3(3., 7., -2.)], &[0.0, 1.0], 0).unwrap();
         let (lo, hi) = spline.bounds();
         assert!((lo.0 - 3.0).abs() < 1e-12);
         assert!((lo.1 - 7.0).abs() < 1e-12);
@@ -1780,11 +1804,9 @@ mod test {
     #[test]
     fn bounds_degree_1() {
         // Tent shape: peak at interior knot, NOT at domain endpoints.
-        let spline = Spline::create_clamped(
-            vec![Vec3(0., 0., 0.), Vec3(1., 3., 0.), Vec3(2., 0., 0.)],
-            1,
-        )
-        .unwrap();
+        let spline =
+            Spline::create_clamped(&[Vec3(0., 0., 0.), Vec3(1., 3., 0.), Vec3(2., 0., 0.)], 1)
+                .unwrap();
         let (lo, hi) = spline.bounds();
         assert!((lo.0 - 0.0).abs() < 1e-12); // min x
         assert!((hi.0 - 2.0).abs() < 1e-12); // max x
@@ -1792,17 +1814,15 @@ mod test {
         assert!((hi.1 - 3.0).abs() < 1e-12); // max y (interior knot)
         verify_bounds(&spline, 1000);
         // V-shape: minimum at interior knot.
-        let spline = Spline::create_clamped(
-            vec![Vec3(0., 2., 0.), Vec3(1., -1., 0.), Vec3(2., 2., 0.)],
-            1,
-        )
-        .unwrap();
+        let spline =
+            Spline::create_clamped(&[Vec3(0., 2., 0.), Vec3(1., -1., 0.), Vec3(2., 2., 0.)], 1)
+                .unwrap();
         let (lo, hi) = spline.bounds();
         assert!((lo.1 - -1.0).abs() < 1e-12); // min y at interior knot
         assert!((hi.1 - 2.0).abs() < 1e-12); // max y at endpoints
         verify_bounds(&spline, 1000);
         // Straight line: bounds should be tight to endpoints.
-        let spline = Spline::create_clamped(vec![Vec3(1., 2., 3.), Vec3(4., 5., 6.)], 1).unwrap();
+        let spline = Spline::create_clamped(&[Vec3(1., 2., 3.), Vec3(4., 5., 6.)], 1).unwrap();
         let (lo, hi) = spline.bounds();
         assert!((lo.0 - 1.0).abs() < 1e-12);
         assert!((lo.1 - 2.0).abs() < 1e-12);
@@ -1818,8 +1838,8 @@ mod test {
         // Quadratic Bézier: P0=(0,0,0), P1=(0.5,2,0), P2=(1,0,0)
         // y(t) = 2*2*t*(1-t) = 4t - 4t^2, max at t=0.5 => y=1.0
         let spline = Spline::create(
-            vec![Vec3(0., 0., 0.), Vec3(0.5, 2., 0.), Vec3(1., 0., 0.)],
-            vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            &[Vec3(0., 0., 0.), Vec3(0.5, 2., 0.), Vec3(1., 0., 0.)],
+            &[0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
             2,
         )
         .unwrap();
@@ -1829,7 +1849,7 @@ mod test {
         verify_bounds(&spline, 1000);
         // Multi-segment: extrema in both segments.
         let spline = Spline::create_clamped(
-            vec![
+            &[
                 Vec3(0., 0., 0.),
                 Vec3(1., 3., 0.),
                 Vec3(2., -1., 0.),
@@ -1848,7 +1868,7 @@ mod test {
     fn bounds_degree_3() {
         // Cubic with overshoot in all 3 coordinates.
         let spline = Spline::create_clamped(
-            vec![
+            &[
                 Vec3(0., 0., 0.),
                 Vec3(1., 5., -2.),
                 Vec3(2., -3., 4.),
@@ -1861,7 +1881,7 @@ mod test {
         verify_bounds(&spline, 10000);
         // Many segments.
         let spline = Spline::create_clamped(
-            vec![
+            &[
                 Vec3(0., 0., 0.),
                 Vec3(1., 2., -1.),
                 Vec3(2., -1., 3.),
@@ -1909,13 +1929,13 @@ mod test {
     #[test]
     fn t_reversed_linear() {
         let spline = Spline::create(
-            vec![
+            &[
                 Vec3(0., 0., 0.),
                 Vec3(1., 3., 0.),
                 Vec3(3., 1., 0.),
                 Vec3(4., 4., 0.),
             ],
-            vec![0.0, 0.0, 1.0, 2.0, 3.0, 3.0],
+            &[0.0, 0.0, 1.0, 2.0, 3.0, 3.0],
             1,
         )
         .unwrap();
@@ -1925,8 +1945,8 @@ mod test {
     #[test]
     fn t_reversed_quadratic_bezier() {
         let spline = Spline::create(
-            vec![Vec3(0., 0., 0.), Vec3(1., 2., 0.), Vec3(2., 0., 0.)],
-            vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            &[Vec3(0., 0., 0.), Vec3(1., 2., 0.), Vec3(2., 0., 0.)],
+            &[0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
             2,
         )
         .unwrap();
@@ -1936,13 +1956,13 @@ mod test {
     #[test]
     fn t_reversed_cubic_bezier() {
         let spline = Spline::create(
-            vec![
+            &[
                 Vec3(0., 0., 0.),
                 Vec3(0., 1., 0.),
                 Vec3(1., 1., 0.),
                 Vec3(1., 0., 0.),
             ],
-            vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+            &[0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
             3,
         )
         .unwrap();
@@ -1952,7 +1972,7 @@ mod test {
     #[test]
     fn t_reversed_cubic_multi_segment() {
         let spline = Spline::create(
-            vec![
+            &[
                 Vec3(1., 2., 3.),
                 Vec3(4., 5., 6.),
                 Vec3(7., 8., 9.),
@@ -1961,7 +1981,7 @@ mod test {
                 Vec3(16., 17., 18.),
                 Vec3(19., 20., 21.),
             ],
-            vec![0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 4.0, 4.0, 4.0],
+            &[0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 4.0, 4.0, 4.0],
             3,
         )
         .unwrap();
@@ -1972,7 +1992,7 @@ mod test {
     fn t_reversed_clamped_3d() {
         // Multi-segment with all 3 coordinates varying.
         let spline = Spline::create_clamped(
-            vec![
+            &[
                 Vec3(0., 0., 0.),
                 Vec3(1., 5., -2.),
                 Vec3(2., -3., 4.),
@@ -1988,7 +2008,7 @@ mod test {
     #[test]
     fn t_reversed_twice_is_identity() {
         let spline = Spline::create_clamped(
-            vec![
+            &[
                 Vec3(0., 0., 0.),
                 Vec3(1., 2., -1.),
                 Vec3(2., -1., 3.),
@@ -2016,14 +2036,14 @@ mod test {
     #[test]
     fn t_reversed_single_segment() {
         // Minimal: degree 1, two control points.
-        let spline = Spline::create_clamped(vec![Vec3(1., 2., 3.), Vec3(4., 5., 6.)], 1).unwrap();
+        let spline = Spline::create_clamped(&[Vec3(1., 2., 3.), Vec3(4., 5., 6.)], 1).unwrap();
         verify_reversed(&spline, 100);
     }
 
     #[test]
     fn t_length_approx_degree_1_straight_line() {
         // Straight line from (0,0,0) to (3,4,0). Length = 5.0 exactly.
-        let spline = Spline::create_clamped(vec![Vec3(0., 0., 0.), Vec3(3., 4., 0.)], 1).unwrap();
+        let spline = Spline::create_clamped(&[Vec3(0., 0., 0.), Vec3(3., 4., 0.)], 1).unwrap();
         let len = spline.length(1e-6);
         assert!((len - 5.0).abs() < 1e-6, "Expected 5.0, got {len}");
     }
@@ -2032,7 +2052,7 @@ mod test {
     fn t_length_approx_degree_1_polyline_3d() {
         // Piecewise linear 3D path: (0,0,0)→(1,0,0)→(1,1,0)→(1,1,1). Length = 3.0.
         let spline = Spline::create_clamped(
-            vec![
+            &[
                 Vec3(0., 0., 0.),
                 Vec3(1., 0., 0.),
                 Vec3(1., 1., 0.),
@@ -2048,7 +2068,7 @@ mod test {
     #[test]
     fn t_length_approx_degree_1_zero_length() {
         // Two identical control points. Length = 0.
-        let spline = Spline::create_clamped(vec![Vec3(1., 2., 3.), Vec3(1., 2., 3.)], 1).unwrap();
+        let spline = Spline::create_clamped(&[Vec3(1., 2., 3.), Vec3(1., 2., 3.)], 1).unwrap();
         let len = spline.length(1e-6);
         assert!(len.abs() < 1e-12, "Expected 0.0, got {len}");
     }
@@ -2064,8 +2084,8 @@ mod test {
             (f(2.0) - f(-2.0)) / 4.0
         };
         let spline = Spline::create(
-            vec![Vec3(0., 0., 0.), Vec3(0.5, 1., 0.), Vec3(1., 0., 0.)],
-            vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            &[Vec3(0., 0., 0.), Vec3(0.5, 1., 0.), Vec3(1., 0., 0.)],
+            &[0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
             2,
         )
         .unwrap();
@@ -2089,13 +2109,13 @@ mod test {
         // Cubic Bézier: P0=(0,0,0), P1=(0,1,0), P2=(1,1,0), P3=(1,0,0).
         // |B'(t)| = 3*(2t^2 - 2t + 1). Exact length = 2.0.
         let spline = Spline::create(
-            vec![
+            &[
                 Vec3(0., 0., 0.),
                 Vec3(0., 1., 0.),
                 Vec3(1., 1., 0.),
                 Vec3(1., 0., 0.),
             ],
-            vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+            &[0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
             3,
         )
         .unwrap();
@@ -2115,7 +2135,7 @@ mod test {
     fn t_length_approx_cubic_multi_segment() {
         // Multi-segment cubic. Verify convergence toward a reference value.
         let spline = Spline::create_clamped(
-            vec![
+            &[
                 Vec3(0., 0., 0.),
                 Vec3(1., 2., -1.),
                 Vec3(2., -1., 3.),
@@ -2156,13 +2176,13 @@ mod test {
         // Cubic Bézier with all 3 coordinates active.
         // Verify convergence: finer tolerance → closer to truth.
         let spline = Spline::create(
-            vec![
+            &[
                 Vec3(0., 0., 0.),
                 Vec3(1., 2., 3.),
                 Vec3(3., 1., -1.),
                 Vec3(4., 0., 2.),
             ],
-            vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+            &[0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
             3,
         )
         .unwrap();
@@ -2192,7 +2212,7 @@ mod test {
     #[test]
     fn t_length_approx_reversed_same() {
         // Length should be the same for the reversed curve.
-        let cps = vec![
+        let cps = &[
             Vec3(0., 0., 0.),
             Vec3(1., 5., -2.),
             Vec3(2., -3., 4.),
@@ -2206,5 +2226,181 @@ mod test {
             (len_fwd - len_rev).abs() < 1e-6,
             "Forward {len_fwd} != reversed {len_rev}"
         );
+    }
+
+    #[test]
+    fn t_clamped_endpoints_match_control_points() {
+        let control_points = [
+            Vec3(0.7123, 3.1416, -2.8081),
+            Vec3(-1.4142, 0.5772, 6.2832),
+            Vec3(2.7183, -0.6931, 1.4427),
+            Vec3(-3.3691, 4.6692, -0.3183),
+            Vec3(0.1103, -2.5029, 5.7722),
+            Vec3(8.3144, 1.6180, -4.1888),
+            Vec3(-0.9033, 7.3891, 0.6137),
+        ];
+        for degree in 1..=6 {
+            let pts = &control_points[..degree + 1];
+            let spline = Spline::create_clamped(pts, degree).unwrap();
+            let first = *pts.first().unwrap();
+            let last = *pts.last().unwrap();
+            assert_eq!(
+                spline.start(),
+                first,
+                "degree {degree}: start {:?} != first control point {first:?}",
+                spline.start()
+            );
+            assert_eq!(
+                spline.end(),
+                last,
+                "degree {degree}: end {:?} != last control point {last:?}",
+                spline.end()
+            );
+        }
+    }
+
+    /// Assert that for a clamped knot vector, the basis functions at domain
+    /// endpoints are exactly 0 or 1.
+    fn assert_clamped_basis_exact_at_endpoints(knots: &[f64], degree: usize) {
+        let u_start = knots[0];
+        let u_max = knots[knots.len() - 1];
+        let mut buf = EvalBuffers::default();
+        // At domain start: first basis function should be 1.
+        let span_start = find_span(knots, degree, u_start);
+        calc_basis(span_start, u_start, degree, knots, &mut buf);
+        assert_eq!(
+            buf.basis[0], 1.0,
+            "degree={degree}: basis[0] at start = {} (expected 1.0); knots={:?}",
+            buf.basis[0], knots
+        );
+        assert!(
+            buf.basis[1..].iter().all(|c| *c == 0.0),
+            "degree={degree}: non-zero basis at start: {:?}",
+            &buf.basis[..degree + 1]
+        );
+        // At domain end: last basis function should be 1.
+        let span_end = find_span(knots, degree, u_max);
+        calc_basis(span_end, u_max, degree, knots, &mut buf);
+        assert_eq!(
+            buf.basis[degree], 1.0,
+            "degree={degree}: basis[{degree}] at end = {} (expected 1.0)",
+            buf.basis[degree]
+        );
+        assert!(
+            buf.basis[..degree].iter().all(|c| *c == 0.0),
+            "degree={degree}: non-zero basis at end: {:?}",
+            &buf.basis[..degree + 1]
+        );
+    }
+
+    /// Build a clamped knot vector from interior knots, a start value, and degree.
+    fn make_clamped_knots(degree: usize, u_start: f64, u_max: f64, interior: &[f64]) -> Vec<f64> {
+        let mut knots = Vec::new();
+        knots.extend(std::iter::repeat_n(u_start, degree + 1));
+        knots.extend(interior.iter().map(|&k| u_start + k));
+        knots.extend(std::iter::repeat_n(u_max, degree + 1));
+        knots
+    }
+
+    const TEST_KNOT_SCALES: &[f64] = &[
+        1e-15,
+        1e-10,
+        1e-6,
+        1.0 / 7.0,
+        1.0 / 3.0,
+        0.5,
+        1.0,
+        std::f64::consts::PI,
+        7.0,
+        100.0,
+        1e6,
+        1e10,
+        1e15,
+    ];
+
+    #[test]
+    fn t_clamped_basis_endpoints_uniform_knots() {
+        let mut rng = StdRng::seed_from_u64(42);
+        for degree in 1..=6 {
+            let n_ctrl = degree + 1;
+            let n_middle = n_ctrl + degree + 1 - 2 * (degree + 1);
+            for &scale in TEST_KNOT_SCALES {
+                let step = 0.1 + rng.random::<f64>() * 10.0;
+                let interior: Vec<f64> = (0..n_middle).map(|i| (i + 1) as f64 * step).collect();
+                let u_start = -scale * rng.random::<f64>();
+                let u_max = u_start
+                    + interior.last().copied().unwrap_or(1.0)
+                    + scale * rng.random::<f64>().max(1e-20);
+                let knots = make_clamped_knots(degree, u_start, u_max, &interior);
+                assert_clamped_basis_exact_at_endpoints(&knots, degree);
+            }
+        }
+    }
+
+    #[test]
+    fn t_clamped_basis_endpoints_random_increment_knots() {
+        let mut rng = StdRng::seed_from_u64(42);
+        for degree in 1..=6 {
+            let n_ctrl = degree + 1;
+            let n_middle = n_ctrl + degree + 1 - 2 * (degree + 1);
+            for &scale in TEST_KNOT_SCALES {
+                let mut val = rng.random::<f64>() * 0.01;
+                let interior: Vec<f64> = (0..n_middle)
+                    .map(|_| {
+                        val += rng.random::<f64>() * rng.random::<f64>() * 100.0 + 1e-12;
+                        val
+                    })
+                    .collect();
+                let u_start = -scale * rng.random::<f64>();
+                let u_max = u_start
+                    + interior.last().copied().unwrap_or(1.0)
+                    + scale * rng.random::<f64>().max(1e-20);
+                let knots = make_clamped_knots(degree, u_start, u_max, &interior);
+                assert_clamped_basis_exact_at_endpoints(&knots, degree);
+            }
+        }
+    }
+
+    #[test]
+    fn t_clamped_basis_endpoints_exponential_knots() {
+        let mut rng = StdRng::seed_from_u64(42);
+        for degree in 1..=6 {
+            let n_ctrl = degree + 1;
+            let n_middle = n_ctrl + degree + 1 - 2 * (degree + 1);
+            for &scale in TEST_KNOT_SCALES {
+                let base = 1.01 + rng.random::<f64>() * 5.0;
+                let interior: Vec<f64> = (0..n_middle).map(|i| base.powi(i as i32 + 1)).collect();
+                let u_start = -scale * rng.random::<f64>();
+                let u_max = u_start
+                    + interior.last().copied().unwrap_or(1.0)
+                    + scale * rng.random::<f64>().max(1e-20);
+                let knots = make_clamped_knots(degree, u_start, u_max, &interior);
+                assert_clamped_basis_exact_at_endpoints(&knots, degree);
+            }
+        }
+    }
+
+    #[test]
+    fn t_clamped_basis_endpoints_tightly_clustered_knots() {
+        let mut rng = StdRng::seed_from_u64(42);
+        for degree in 1..=6 {
+            let n_ctrl = degree + 1;
+            let n_middle = n_ctrl + degree + 1 - 2 * (degree + 1);
+            for &scale in TEST_KNOT_SCALES {
+                let mut val = 1.0;
+                let interior: Vec<f64> = (0..n_middle)
+                    .map(|_| {
+                        val += f64::EPSILON * (1.0 + rng.random::<f64>() * 1e6);
+                        val
+                    })
+                    .collect();
+                let u_start = -scale * rng.random::<f64>();
+                let u_max = u_start
+                    + interior.last().copied().unwrap_or(1.0)
+                    + scale * rng.random::<f64>().max(1e-20);
+                let knots = make_clamped_knots(degree, u_start, u_max, &interior);
+                assert_clamped_basis_exact_at_endpoints(&knots, degree);
+            }
+        }
     }
 }

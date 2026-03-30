@@ -1,5 +1,8 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use loke::polynomial::{DEFAULT_ERROR, find_roots};
+use loke::{
+    Arc, Spline, Vec3,
+    polynomial::{DEFAULT_ERROR, find_roots},
+};
 
 // ---------------------------------------------------------------------------
 // Deterministic PRNG — identical implementation in bench.cpp
@@ -89,9 +92,8 @@ fn generate_polys<const MDP1: usize>() -> Vec<[f64; MDP1]> {
     polys
 }
 
-fn bench_degree<const MDP1: usize>(c: &mut Criterion, label: &str) {
+fn b_root_finding<const MDP1: usize>(c: &mut Criterion, label: &str) {
     let polys = generate_polys::<MDP1>();
-
     c.bench_function(label, |b| {
         let mut i = 0usize;
         let mut roots = [0.0f64; MDP1];
@@ -107,15 +109,141 @@ fn bench_degree<const MDP1: usize>(c: &mut Criterion, label: &str) {
     });
 }
 
+fn b_spline_adaptive_samples(c: &mut Criterion) {
+    let spline = Spline::create_clamped(
+        &[
+            Vec3(-2.0, 0.0, 0.0),
+            Vec3(-0.5, 2.0, 1.0),
+            Vec3(0.5, -2.0, 1.0),
+            Vec3(2.0, 2.0, 0.0),
+            Vec3(3.5, 0.0, 0.0),
+        ],
+        3,
+    )
+    .unwrap();
+    let mut buf = Vec::new();
+    c.bench_function("degree_03_spline_adaptive_samples", |b| {
+        buf.clear();
+        b.iter(|| {
+            buf.extend(black_box(spline.adaptive_samples(0.00001)));
+        });
+    });
+}
+
+fn b_spline_length(c: &mut Criterion) {
+    let spline = Spline::create_clamped(
+        &[
+            Vec3(-2.0, 0.0, 0.0),
+            Vec3(-0.5, 2.0, 1.0),
+            Vec3(0.5, -2.0, 1.0),
+            Vec3(2.0, 2.0, 0.0),
+            Vec3(3.5, 0.0, 0.0),
+        ],
+        3,
+    )
+    .unwrap();
+    c.bench_function("degree_03_spline_length", |b| {
+        let mut lsum = 0.0_f64;
+        b.iter(|| {
+            lsum += black_box(spline.length(1e-5));
+        });
+    });
+}
+
+fn b_spline_eval(c: &mut Criterion) {
+    let spline = Spline::create_clamped(
+        &[
+            Vec3(-2.0, 0.0, 0.0),
+            Vec3(-0.5, 2.0, 1.0),
+            Vec3(0.5, -2.0, 1.0),
+            Vec3(2.0, 2.0, 0.0),
+            Vec3(3.5, 0.0, 0.0),
+        ],
+        3,
+    )
+    .unwrap();
+    const N_SAMPLES: usize = 1000;
+    let (dom_start, dom_end) = spline.domain();
+    let params: Vec<f64> = (0..=N_SAMPLES)
+        .map(|i| {
+            let t = (i as f64) / (N_SAMPLES as f64);
+            dom_start * (1.0 - t) + dom_end * t
+        })
+        .collect();
+    c.bench_function("degree_03_spline_eval_point", move |b| {
+        let mut psum = Vec3(0.0, 0.0, 0.0);
+        b.iter(|| {
+            for t in params.iter() {
+                psum += black_box(spline.point(*t).unwrap());
+            }
+        });
+    });
+}
+
+fn b_spline_eval_with_deriv(c: &mut Criterion) {
+    let spline = Spline::create_clamped(
+        &[
+            Vec3(-2.0, 0.0, 0.0),
+            Vec3(-0.5, 2.0, 1.0),
+            Vec3(0.5, -2.0, 1.0),
+            Vec3(2.0, 2.0, 0.0),
+            Vec3(3.5, 0.0, 0.0),
+        ],
+        3,
+    )
+    .unwrap();
+    const N_SAMPLES: usize = 1000;
+    let (dom_start, dom_end) = spline.domain();
+    let params: Vec<f64> = (0..=N_SAMPLES)
+        .map(|i| {
+            let t = (i as f64) / (N_SAMPLES as f64);
+            dom_start * (1.0 - t) + dom_end * t
+        })
+        .collect();
+    c.bench_function("degree_03_spline_eval_point_with_deriv", move |b| {
+        let mut results = [Vec3(0.0, 0.0, 0.0); 3];
+        b.iter(|| {
+            for t in params.iter() {
+                black_box(
+                    spline
+                        .point_with_derivs(*t, black_box(&mut results))
+                        .unwrap(),
+                );
+            }
+        });
+    });
+}
+
+fn b_arc_adaptive_samples(c: &mut Criterion) {
+    let arc = Arc::from_three_points(
+        Vec3(-3.5, 0.0, 0.0), // start
+        Vec3(-3.0, 1.5, 0.0), // middle
+        Vec3(-2.5, 0.0, 0.0), // end
+    )
+    .unwrap();
+    let mut buf = Vec::new();
+    c.bench_function("arc_adaptive_samples", |b| {
+        buf.clear();
+        b.iter(|| {
+            buf.extend(black_box(arc.adaptive_samples(0.00001)));
+        });
+    });
+}
+
 fn benchmarks(c: &mut Criterion) {
-    bench_degree::<4>(c, "degree_03");
-    bench_degree::<5>(c, "degree_04");
-    bench_degree::<6>(c, "degree_05");
-    bench_degree::<7>(c, "degree_06");
-    bench_degree::<8>(c, "degree_07");
-    bench_degree::<9>(c, "degree_08");
-    bench_degree::<10>(c, "degree_09");
-    bench_degree::<11>(c, "degree_10");
+    b_root_finding::<4>(c, "degree_03_root_finding");
+    b_root_finding::<5>(c, "degree_04_root_finding");
+    b_root_finding::<6>(c, "degree_05_root_finding");
+    b_root_finding::<7>(c, "degree_06_root_finding");
+    b_root_finding::<8>(c, "degree_07_root_finding");
+    b_root_finding::<9>(c, "degree_08_root_finding");
+    b_root_finding::<10>(c, "degree_09_root_finding");
+    b_root_finding::<11>(c, "degree_10_root_finding");
+    b_spline_adaptive_samples(c);
+    b_arc_adaptive_samples(c);
+    b_spline_length(c);
+    b_spline_eval(c);
+    b_spline_eval_with_deriv(c);
 }
 
 criterion_group!(benches, benchmarks);

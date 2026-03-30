@@ -1128,7 +1128,7 @@ impl Scene for CurveScene {
     ) {
         // Splines.
         splines.clear();
-        let curve = Spline::create_clamped(inputs[0..5].to_vec(), 3).unwrap();
+        let curve = Spline::create_clamped(&inputs[0..5], 3).unwrap();
         points.clear();
         points.push({
             let (a, b) = curve.domain();

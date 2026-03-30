@@ -11,8 +11,8 @@ const ANG_EPS: f64 = 1e-10;
 pub struct Arc {
     center: Vec3,
     start_dir: Vec3, // Unit vector from center toward start.
-    end_dir: Vec3,   // Unit vector from center toward end.
     mid_dir: Vec3,   // Unit vector from center toward midpoint (used for antipodal SLERP).
+    end_dir: Vec3,   // Unit vector from center toward end.
     radius: f64,
     angle: f64, // Signed sweep angle from start to end through mid. Positive = CCW around normal.
 }
@@ -24,15 +24,15 @@ impl Arc {
             circumcircle(start, middle, end).ok_or(Error::PointsCollinear)?;
         let start_dir = (start - center).normalize();
         let end_dir = (end - center).normalize();
-        let mid_dir = (middle - center).normalize();
         let angle = oriented_angle(start_dir, end_dir, normal);
+        let mid_dir = rotate_around(start_dir, normal, angle * 0.5);
         check_radius_and_angle(radius, angle)?;
         Ok(Arc {
             center,
             radius,
             start_dir,
-            end_dir,
             mid_dir,
+            end_dir,
             angle,
         })
     }
@@ -61,15 +61,15 @@ impl Arc {
             halfchord / angle.tan()
         };
         let center = (start + end) * 0.5 + normal.cross(chord).normalize() * shift;
-        let va = (start - center).normalize();
-        let vb = (end - center).normalize();
-        let mid_dir = rotate_around(va, normal, sweep * 0.5);
+        let start_dir = (start - center).normalize();
+        let end_dir = (end - center).normalize();
+        let mid_dir = rotate_around(start_dir, normal, sweep * 0.5);
         Ok(Arc {
             center,
             radius,
-            start_dir: va,
-            end_dir: vb,
+            start_dir,
             mid_dir,
+            end_dir,
             angle: sweep,
         })
     }
@@ -102,8 +102,8 @@ impl Arc {
             center,
             radius,
             start_dir,
-            end_dir,
             mid_dir,
+            end_dir,
             angle,
         })
     }
@@ -145,9 +145,13 @@ impl Arc {
         if t < 0.0 || t > len {
             return None;
         }
-        let t = t / len; // Normalize
-        let dir = slerp(self.start_dir, self.end_dir, self.mid_dir, self.angle, t);
-        Some(self.center + dir * self.radius)
+        let coeff = slerp(self.angle, t / len);
+        Some(
+            self.center
+                + self.start_dir * coeff[0] * self.radius
+                + self.mid_dir * coeff[1] * self.radius
+                + self.end_dir * coeff[2] * self.radius,
+        )
     }
 
     /// Evaluate the unit tangent at arc-length parameter `t` in `[0, length]`.
@@ -156,9 +160,12 @@ impl Arc {
         if t < 0.0 || t > len || self.radius < f64::EPSILON {
             return None;
         }
-        let t = t / len; // Normalize
-        let deriv = slerp_deriv(self.start_dir, self.end_dir, self.mid_dir, self.angle, t);
-        Some(deriv / self.angle) // Arc-length parameterization: scale by ds/dt = 1/length to get unit tangent.
+        let coeff = slerp_deriv(self.angle, t / len);
+        // Arc-length parameterization: scale by ds/dt = 1/length to get unit tangent.
+        Some(
+            (self.start_dir * coeff[0] + self.mid_dir * coeff[1] + self.end_dir * coeff[2])
+                / self.angle,
+        )
     }
 
     pub fn point_with_derivs(&self, t: f64, results: &mut [Vec3]) -> Result<(), Error> {
@@ -171,15 +178,23 @@ impl Arc {
         }
         let frac = t / len;
         if results.len() == 1 {
-            let dir = slerp(self.start_dir, self.end_dir, self.mid_dir, self.angle, frac);
-            results[0] = self.center + dir * self.radius;
+            let coeff = slerp(self.angle, frac);
+            results[0] = self.center
+                + self.start_dir * coeff[0] * self.radius
+                + self.mid_dir * coeff[1] * self.radius
+                + self.end_dir * coeff[2] * self.radius;
             Ok(())
         } else {
-            let (dir, deriv) =
-                slerp_with_deriv(self.start_dir, self.end_dir, self.mid_dir, self.angle, frac);
-            let pos = self.center + dir * self.radius;
+            let [pos_coeff, deriv_coeff] = slerp_with_deriv(self.angle, frac);
+            let pos = self.center
+                + self.start_dir * pos_coeff[0] * self.radius
+                + self.mid_dir * pos_coeff[1] * self.radius
+                + self.end_dir * pos_coeff[2] * self.radius;
             results[0] = pos;
-            results[1] = deriv / self.angle;
+            results[1] = (self.start_dir * deriv_coeff[0]
+                + self.mid_dir * deriv_coeff[1]
+                + self.end_dir * deriv_coeff[2])
+                / self.angle;
             if results.len() > 2 {
                 results[2] = (self.center - pos) / (self.radius * self.radius);
                 results[3..].fill(Vec3(0.0, 0.0, 0.0));
@@ -191,19 +206,36 @@ impl Arc {
     /// Uniformly sample the arc with the given tolerance (max chord deviation).
     /// For a circle, the chord error at step angle α is `r(1 - cos(α/2))`.
     /// Solving for α: `α = 2 * acos(1 - tolerance/r)`.
-    pub fn adaptive_samples(&self, tolerance: f64) -> impl Iterator<Item = Vec3> + '_ {
-        let len = self.length();
-        let max_angle = if self.radius > EPS && tolerance > 0.0 {
+    pub fn adaptive_samples(&self, tolerance: f64) -> impl Iterator<Item = Vec3> {
+        let ang_step = if self.radius > EPS && tolerance > 0.0 {
             2.0 * (1.0 - (tolerance / self.radius).min(1.0)).acos()
         } else {
             0.1 // fallback
         };
-        let n = ((self.angle / max_angle).ceil() as usize).max(1);
-        (0..=n).map(move |i| {
-            let frac = i as f64 / n as f64;
-            let t = frac * len;
-            self.point(t).unwrap()
-        })
+        let half_angle = 0.5 * self.angle;
+        let n = if self.angle < ANG_EPS {
+            1
+        } else {
+            ((half_angle / ang_step).ceil() as usize).max(1)
+        };
+        let nf = n as f64;
+        let inv_sin = 1.0 / half_angle.sin();
+        std::iter::once([1.0, 0.0, 0.0])
+            .chain((1..=n).map(move |i| {
+                let coeff = slerp_raw_no_adjust(half_angle, (i as f64) / nf);
+                [inv_sin * coeff[0], inv_sin * coeff[1], 0.0]
+            }))
+            .chain((1..n).map(move |i| {
+                let coeff = slerp_raw_no_adjust(half_angle, (i as f64) / nf);
+                [0.0, inv_sin * coeff[0], inv_sin * coeff[1]]
+            }))
+            .chain(std::iter::once([0.0, 0.0, 1.0]))
+            .map(|coeff| {
+                self.center
+                    + self.start_dir * coeff[0] * self.radius
+                    + self.mid_dir * coeff[1] * self.radius
+                    + self.end_dir * coeff[2] * self.radius
+            })
     }
 
     /// Compute the axis-aligned bounding box of the arc.
@@ -363,71 +395,90 @@ fn oriented_angle(from: Vec3, to: Vec3, normal: Vec3) -> f64 {
     if angle < 0.0 { angle + TAU } else { angle }
 }
 
-/// SLERP between unit vectors `a` and `b` with explicit angle `theta`.
-/// `mid` is used to resolve the antipodal case (|theta| ≈ π).
-fn slerp(a: Vec3, b: Vec3, mid: Vec3, angle: f64, t: f64) -> Vec3 {
+#[inline(always)]
+fn slerp(angle: f64, t: f64) -> [f64; 3] {
     if angle < ANG_EPS {
-        return a * (1.0 - t) + b * t;
+        return [1.0 - t, 0.0, t];
     }
-    if (angle - PI).abs() < ANG_EPS {
-        let half = angle / 2.0;
-        if t <= 0.5 {
-            return slerp(a, mid, mid, half, t * 2.0);
-        } else {
-            return slerp(mid, b, mid, half, (t - 0.5) * 2.0);
-        }
+    let half = angle * 0.5;
+    if t <= 0.5 {
+        let coeff = slerp_raw(half, t * 2.0);
+        [coeff[0], coeff[1], 0.0]
+    } else {
+        let coeff = slerp_raw(half, (t - 0.5) * 2.0);
+        [0.0, coeff[0], coeff[1]]
     }
+}
+
+#[inline(always)]
+fn slerp_raw(angle: f64, t: f64) -> [f64; 2] {
     let inv_sin = 1.0 / angle.sin();
-    let w0 = ((1.0 - t) * angle).sin() * inv_sin;
-    let w1 = (t * angle).sin() * inv_sin;
-    a * w0 + b * w1
+    slerp_raw_no_adjust(angle, t).map(|c| c * inv_sin)
+}
+
+#[inline(always)]
+fn slerp_raw_no_adjust(angle: f64, t: f64) -> [f64; 2] {
+    [((1.0 - t) * angle).sin(), (t * angle).sin()]
 }
 
 /// Derivative of SLERP with respect to the fractional parameter `t` in [0, 1].
 /// d/dt [sin((1-t)θ)/sin(θ) · a + sin(tθ)/sin(θ) · b]
 ///    = θ/sin(θ) · [-cos((1-t)θ) · a + cos(tθ) · b]
-fn slerp_deriv(a: Vec3, b: Vec3, mid: Vec3, angle: f64, t: f64) -> Vec3 {
+#[inline(always)]
+fn slerp_deriv(angle: f64, t: f64) -> [f64; 3] {
     if angle < ANG_EPS {
-        return b - a;
+        return [-1.0, 0.0, 1.0];
     }
-    if (angle - PI).abs() < ANG_EPS {
-        let half = angle / 2.0;
-        // Chain rule: d/dt f(2t) = 2 * f'(2t).
-        if t <= 0.5 {
-            return slerp_deriv(a, mid, mid, half, t * 2.0) * 2.0;
-        } else {
-            return slerp_deriv(mid, b, mid, half, (t - 0.5) * 2.0) * 2.0;
-        }
+    let half = angle / 2.0;
+    // Chain rule: d/dt f(2t) = 2 * f'(2t).
+    if t <= 0.5 {
+        let coeff = slerp_deriv_unchecked(half, t * 2.0).map(|c| c * 2.0);
+        [coeff[0], coeff[1], 0.0]
+    } else {
+        let coeff = slerp_deriv_unchecked(half, (t - 0.5) * 2.0).map(|c| c * 2.0);
+        [0.0, coeff[0], coeff[1]]
     }
+}
+
+fn slerp_deriv_unchecked(angle: f64, t: f64) -> [f64; 2] {
     let theta_over_sin = angle / angle.sin();
     let w0 = -((1.0 - t) * angle).cos() * theta_over_sin;
     let w1 = (t * angle).cos() * theta_over_sin;
-    a * w0 + b * w1
+    [w0, w1]
 }
 
 /// Combined SLERP value and derivative, sharing branching and trig.
-fn slerp_with_deriv(a: Vec3, b: Vec3, mid: Vec3, angle: f64, t: f64) -> (Vec3, Vec3) {
+#[inline(always)]
+fn slerp_with_deriv(angle: f64, t: f64) -> [[f64; 3]; 2] {
     if angle < ANG_EPS {
-        return (a * (1.0 - t) + b * t, b - a);
+        return [[1.0 - t, 0.0, t], [-1.0, 0.0, 1.0]];
     }
-    if (angle - PI).abs() < ANG_EPS {
-        let half = angle / 2.0;
-        if t <= 0.5 {
-            let (val, deriv) = slerp_with_deriv(a, mid, mid, half, t * 2.0);
-            return (val, deriv * 2.0);
-        } else {
-            let (val, deriv) = slerp_with_deriv(mid, b, mid, half, (t - 0.5) * 2.0);
-            return (val, deriv * 2.0);
-        }
+    let half = angle / 2.0;
+    if t <= 0.5 {
+        let [val_coeff, deriv_coeff] = slerp_with_deriv_unchecked(half, t * 2.0);
+        [
+            [val_coeff[0], val_coeff[1], 0.0],
+            [deriv_coeff[0] * 2.0, deriv_coeff[1] * 2.0, 0.0], // Chain rule.
+        ]
+    } else {
+        let [val_coeff, deriv_coeff] = slerp_with_deriv_unchecked(half, (t - 0.5) * 2.0);
+        [
+            [0.0, val_coeff[0], val_coeff[1]],
+            [0.0, deriv_coeff[0] * 2.0, deriv_coeff[1] * 2.0], // Chain rule.
+        ]
     }
+}
+
+fn slerp_with_deriv_unchecked(angle: f64, t: f64) -> [[f64; 2]; 2] {
     let inv_sin = 1.0 / angle.sin();
     let arg0 = (1.0 - t) * angle;
     let arg1 = t * angle;
     let (sin0, cos0) = arg0.sin_cos();
     let (sin1, cos1) = arg1.sin_cos();
-    let val = a * (sin0 * inv_sin) + b * (sin1 * inv_sin);
-    let deriv = a * (-cos0 * angle * inv_sin) + b * (cos1 * angle * inv_sin);
-    (val, deriv)
+    [
+        [(sin0 * inv_sin), (sin1 * inv_sin)],
+        [(-cos0 * angle * inv_sin), (cos1 * angle * inv_sin)],
+    ]
 }
 
 #[cfg(test)]
