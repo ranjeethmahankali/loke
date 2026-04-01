@@ -5,39 +5,38 @@
 //
 // Supports polynomials up to degree 16.
 
-use crate::error::Error;
-
-/// Default positional error tolerance for `f64` root finding (matches cyPolynomial).
-pub const DEFAULT_ERROR: f64 = 6e-7;
+use crate::{ScalarAdaptor, error::Error};
 
 // ---- Helpers ----
 
 #[inline(always)]
-fn mult_sign(v: f64, sign: f64) -> f64 {
-    if sign < 0.0 { -v } else { v }
+fn mult_sign<P: ScalarAdaptor>(v: P::Float, sign: P::Float) -> P::Float {
+    if sign < P::scalar(0.0) { -v } else { v }
 }
 
 #[inline(always)]
-fn is_different_sign(a: f64, b: f64) -> bool {
-    (a < 0.0) != (b < 0.0)
+fn is_different_sign<P: ScalarAdaptor>(a: P::Float, b: P::Float) -> bool {
+    (a < P::scalar(0.0)) != (b < P::scalar(0.0))
 }
 
 /// Evaluate polynomial using Horner's method.
 #[inline(always)]
-pub fn eval(coef: &[f64], x: f64) -> f64 {
-    coef.iter().rev().fold(0.0, |acc, c| acc.mul_add(x, *c))
+pub fn eval<P: ScalarAdaptor>(coef: &[P::Float], x: P::Float) -> P::Float {
+    coef.iter()
+        .rev()
+        .fold(P::scalar(0.0), |acc, c| P::mul_add(acc, x, *c))
 }
 
 /// Evaluate polynomial and its derivative simultaneously using Horner's method.
 /// Returns (f(x), f'(x)). Saves N-1 multiplications vs two separate evaluations.
 #[inline(always)]
-pub fn eval_with_deriv(coef: &[f64], x: f64) -> (f64, f64) {
+pub fn eval_with_deriv<P: ScalarAdaptor>(coef: &[P::Float], x: P::Float) -> (P::Float, P::Float) {
     let n = coef.len() - 1;
     let mut r = coef[n];
-    let mut d = 0.0f64;
+    let mut d = P::scalar(0.0);
     for i in (0..n).rev() {
-        d = d.mul_add(x, r);
-        r = r.mul_add(x, coef[i]);
+        d = P::mul_add(d, x, r);
+        r = P::mul_add(r, x, coef[i]);
     }
     (r, d)
 }
@@ -45,22 +44,22 @@ pub fn eval_with_deriv(coef: &[f64], x: f64) -> (f64, f64) {
 /// Differentiate a polynomial and write the coefficients of the derivative
 /// polynomial into `deriv`.
 #[inline(always)]
-pub fn differentiate(coef: &[f64], deriv: &mut [f64]) {
+pub fn differentiate<P: ScalarAdaptor>(coef: &[P::Float], deriv: &mut [P::Float]) {
     let n = coef.len() - 1;
-    assert_eq!(deriv.len() + 1, coef.len());
+    debug_assert_eq!(deriv.len() + 1, coef.len());
     for i in 0..n {
-        deriv[i] = (i as f64 + 1.0) * coef[i + 1];
+        deriv[i] = (P::scalar(i as f64 + 1.0)) * coef[i + 1];
     }
 }
 
 /// Multiply two polynomials and add the result to `sum`.
 /// `sum` must have length >= `a.len() + b.len() - 1`.
 #[inline(always)]
-pub fn mul_add(a: &[f64], b: &[f64], dst: &mut [f64]) {
+pub fn mul_add<P: ScalarAdaptor>(a: &[P::Float], b: &[P::Float], dst: &mut [P::Float]) {
     if a.is_empty() || b.is_empty() {
         return;
     }
-    assert!(dst.len() >= a.len() + b.len() - 1);
+    debug_assert!(dst.len() >= a.len() + b.len() - 1);
     for i in 0..a.len() {
         for j in 0..b.len() {
             dst[i + j] += a[i] * b[j];
@@ -73,20 +72,26 @@ pub fn mul_add(a: &[f64], b: &[f64], dst: &mut [f64]) {
 /// with `(x - R)` where `R` is the provided root. The coefficients of the
 /// resulting polynomial are written into `def_poly`.
 #[inline(always)]
-fn deflate(coef: &[f64], root: f64, def_poly: &mut [f64]) {
+fn deflate<P: ScalarAdaptor>(coef: &[P::Float], root: P::Float, def_poly: &mut [P::Float]) {
     let n = coef.len() - 1;
-    assert_eq!(def_poly.len(), n);
+    debug_assert_eq!(def_poly.len(), n);
     def_poly[n - 1] = coef[n];
     for i in (0..n - 1).rev() {
-        def_poly[i] = root.mul_add(def_poly[i + 1], coef[i + 1]);
+        def_poly[i] = P::mul_add(root, def_poly[i + 1], coef[i + 1]);
     }
 }
 
 /// Finds roots in a closed interval, using a combination of Newton method and bisection.
-fn find_closed(coef: &[f64], x0: f64, x1: f64, y0: f64, x_error: f64) -> f64 {
+fn find_closed<P: ScalarAdaptor>(
+    coef: &[P::Float],
+    x0: P::Float,
+    x1: P::Float,
+    y0: P::Float,
+    x_error: P::Float,
+) -> P::Float {
     let n = coef.len() - 1;
-    let ep2 = 2.0 * x_error;
-    let mut xr = (x0 + x1) / 2.0;
+    let ep2 = P::scalar(2.0) * x_error;
+    let mut xr = (x0 + x1) / P::scalar(2.0);
     if x1 - x0 <= ep2 {
         return xr;
     }
@@ -94,22 +99,22 @@ fn find_closed(coef: &[f64], x0: f64, x1: f64, y0: f64, x_error: f64) -> f64 {
     if n == 2 || n == 3 {
         let xr0 = xr;
         for _ in 0..16 {
-            let (fx, dy) = eval_with_deriv(coef, xr);
-            let xn = (xr - fx / dy).clamp(x0, x1);
-            if (xr - xn).abs() <= x_error {
+            let (fx, dy) = eval_with_deriv::<P>(coef, xr);
+            let xn = P::clamp(xr - fx / dy, x0, x1);
+            if P::abs(xr - xn) <= x_error {
                 return xn;
             }
             xr = xn;
         }
-        if !xr.is_finite() {
+        if !P::is_finite(xr) {
             xr = xr0;
         }
     }
-    let (mut yr, mut dy) = eval_with_deriv(coef, xr);
+    let (mut yr, mut dy) = eval_with_deriv::<P>(coef, xr);
     let mut xb0 = x0;
     let mut xb1 = x1;
     loop {
-        let side = is_different_sign(y0, yr);
+        let side = is_different_sign::<P>(y0, yr);
         if side {
             xb1 = xr;
         } else {
@@ -118,61 +123,69 @@ fn find_closed(coef: &[f64], x0: f64, x1: f64, y0: f64, x_error: f64) -> f64 {
         let dx = yr / dy;
         let xn = xr - dx;
         if xn > xb0 && xn < xb1 {
-            let stepsize = (xr - xn).abs();
+            let stepsize = P::abs(xr - xn);
             xr = xn;
             if stepsize > x_error {
-                (yr, dy) = eval_with_deriv(coef, xr);
+                (yr, dy) = eval_with_deriv::<P>(coef, xr);
             } else {
                 break;
             }
         } else {
-            xr = (xb0 + xb1) / 2.0;
+            xr = (xb0 + xb1) / P::scalar(2.0);
             if xr == xb0 || xr == xb1 || xb1 - xb0 <= ep2 {
                 break;
             }
-            (yr, dy) = eval_with_deriv(coef, xr);
+            (yr, dy) = eval_with_deriv::<P>(coef, xr);
         }
     }
     xr
 }
 
-fn find_open_impl(
-    coef: &[f64],
-    deriv: &[f64],
-    mut xm: f64,
-    mut ym: f64,
-    mut xr: f64,
-    x_error: f64,
+fn find_open_impl<P: ScalarAdaptor>(
+    coef: &[P::Float],
+    deriv: &[P::Float],
+    mut xm: P::Float,
+    mut ym: P::Float,
+    mut xr: P::Float,
+    x_error: P::Float,
     open_min: bool,
-) -> f64 {
-    let mut delta = 1.0;
-    let mut yr = eval(coef, xr);
-    let mut otherside = is_different_sign(ym, yr);
-    while yr != 0.0 {
+) -> P::Float {
+    let mut delta = P::scalar(1.0);
+    let mut yr = eval::<P>(coef, xr);
+    let mut otherside = is_different_sign::<P>(ym, yr);
+    while yr != P::scalar(0.0) {
         if otherside {
             return if open_min {
-                find_closed(coef, xr, xm, yr, x_error)
+                find_closed::<P>(coef, xr, xm, yr, x_error)
             } else {
-                find_closed(coef, xm, xr, ym, x_error)
+                find_closed::<P>(coef, xm, xr, ym, x_error)
             };
         }
         // Search the open interval
         loop {
             xm = xr;
             ym = yr;
-            let dy = eval(deriv, xr);
+            let dy = eval::<P>(deriv, xr);
             let dx = yr / dy;
             let xn = xr - dx;
             let dif = if open_min { xr - xn } else { xn - xr };
-            if dif <= 0.0 && xn.is_finite() {
+            if dif <= P::scalar(0.0) && P::is_finite(xn) {
                 xr = xn;
                 if dif <= x_error {
                     if xr == xm {
                         return xr;
                     }
-                    let xs = xn - mult_sign(x_error, if open_min { -1.0 } else { 0.0 });
-                    let ys = eval(coef, xs);
-                    let s = is_different_sign(ym, ys);
+                    let xs = xn
+                        - mult_sign::<P>(
+                            x_error,
+                            if open_min {
+                                P::scalar(-1.0)
+                            } else {
+                                P::scalar(0.0)
+                            },
+                        );
+                    let ys = eval::<P>(coef, xs);
+                    let s = is_different_sign::<P>(ym, ys);
                     if s {
                         return xr;
                     }
@@ -182,10 +195,10 @@ fn find_open_impl(
                 }
             } else {
                 xr = if open_min { xr - delta } else { xr + delta };
-                delta *= 2.0;
+                delta *= P::scalar(2.0);
             }
-            yr = eval(coef, xr);
-            otherside = is_different_sign(ym, yr);
+            yr = eval::<P>(coef, xr);
+            otherside = is_different_sign::<P>(ym, yr);
             break;
         }
     }
@@ -193,86 +206,117 @@ fn find_open_impl(
 }
 
 #[inline(always)]
-fn find_open_min(coef: &[f64], deriv: &[f64], x1: f64, y1: f64, x_error: f64) -> f64 {
-    find_open_impl(coef, deriv, x1, y1, x1 - 1.0, x_error, true)
+fn find_open_min<P: ScalarAdaptor>(
+    coef: &[P::Float],
+    deriv: &[P::Float],
+    x1: P::Float,
+    y1: P::Float,
+    x_error: P::Float,
+) -> P::Float {
+    find_open_impl::<P>(coef, deriv, x1, y1, x1 - P::scalar(1.0), x_error, true)
 }
 
 #[inline(always)]
-fn find_open_max(coef: &[f64], deriv: &[f64], x0: f64, y0: f64, x_error: f64) -> f64 {
-    find_open_impl(coef, deriv, x0, y0, x0 + 1.0, x_error, false)
+fn find_open_max<P: ScalarAdaptor>(
+    coef: &[P::Float],
+    deriv: &[P::Float],
+    x0: P::Float,
+    y0: P::Float,
+    x_error: P::Float,
+) -> P::Float {
+    find_open_impl::<P>(coef, deriv, x0, y0, x0 + P::scalar(1.0), x_error, false)
 }
 
-fn find_open(coef: &[f64], deriv: &[f64], x_error: f64) -> f64 {
+fn find_open<P: ScalarAdaptor>(
+    coef: &[P::Float],
+    deriv: &[P::Float],
+    x_error: P::Float,
+) -> P::Float {
     let n = coef.len() - 1;
     debug_assert!(n & 1 == 1, "FindOpen only works for odd degree polynomials");
-    let xr = 0.0;
+    let xr = P::scalar(0.0);
     let yr = coef[0];
-    if is_different_sign(coef[n], yr) {
-        find_open_max(coef, deriv, xr, yr, x_error)
+    if is_different_sign::<P>(coef[n], yr) {
+        find_open_max::<P>(coef, deriv, xr, yr, x_error)
     } else {
-        find_open_min(coef, deriv, xr, yr, x_error)
+        find_open_min::<P>(coef, deriv, xr, yr, x_error)
     }
 }
 
 // ---- Linear root ----
 
-fn linear_root_bounded(coef: &[f64], x0: f64, x1: f64) -> (f64, usize) {
-    if coef[1] != 0.0 {
+fn linear_root_bounded<P: ScalarAdaptor>(
+    coef: &[P::Float],
+    x0: P::Float,
+    x1: P::Float,
+) -> (P::Float, usize) {
+    if coef[1] != P::scalar(0.0) {
         let r = -coef[0] / coef[1];
         (r, if r >= x0 && r <= x1 { 1 } else { 0 })
     } else {
-        ((x0 + x1) / 2.0, if coef[0] == 0.0 { 1 } else { 0 })
+        (
+            (x0 + x1) / P::scalar(2.0),
+            if coef[0] == P::scalar(0.0) { 1 } else { 0 },
+        )
     }
 }
 
-fn linear_root_unbounded(coef: &[f64]) -> (f64, usize) {
-    (-coef[0] / coef[1], if coef[1] != 0.0 { 1 } else { 0 })
+fn linear_root_unbounded<P: ScalarAdaptor>(coef: &[P::Float]) -> (P::Float, usize) {
+    (
+        -coef[0] / coef[1],
+        if coef[1] != P::scalar(0.0) { 1 } else { 0 },
+    )
 }
 
 // ---- Quadratic roots ----
 
-fn quadratic_roots_unbounded(coef: &[f64], roots: &mut [f64]) -> usize {
+fn quadratic_roots_unbounded<P: ScalarAdaptor>(coef: &[P::Float], roots: &mut [P::Float]) -> usize {
     let c = coef[0];
     let b = coef[1];
     let a = coef[2];
-    let delta = b * b - 4.0 * a * c;
-    if delta > 0.0 {
-        let d = delta.sqrt();
-        let q = -0.5 * (b + mult_sign(d, b));
+    let delta = b * b - P::scalar(4.0) * a * c;
+    if delta > P::scalar(0.0) {
+        let d = P::sqrt(delta);
+        let q = P::scalar(-0.5) * (b + mult_sign::<P>(d, b));
         let rv0 = q / a;
         let rv1 = c / q;
-        roots[0] = rv0.min(rv1);
-        roots[1] = rv0.max(rv1);
+        roots[0] = P::min(rv0, rv1);
+        roots[1] = P::max(rv1, rv0);
         2
-    } else if delta < 0.0 {
+    } else if delta < P::scalar(0.0) {
         0
     } else {
-        roots[0] = -0.5 * b / a;
-        if a != 0.0 { 1 } else { 0 }
+        roots[0] = P::scalar(-0.5) * b / a;
+        if a != P::scalar(0.0) { 1 } else { 0 }
     }
 }
 
-fn quadratic_roots_bounded(coef: &[f64], roots: &mut [f64], x0: f64, x1: f64) -> usize {
+fn quadratic_roots_bounded<P: ScalarAdaptor>(
+    coef: &[P::Float],
+    roots: &mut [P::Float],
+    x0: P::Float,
+    x1: P::Float,
+) -> usize {
     let c = coef[0];
     let b = coef[1];
     let a = coef[2];
-    let delta = b * b - 4.0 * a * c;
-    if delta > 0.0 {
-        let d = delta.sqrt();
-        let q = -0.5 * (b + mult_sign(d, b));
+    let delta = b * b - P::scalar(4.0) * a * c;
+    if delta > P::scalar(0.0) {
+        let d = P::sqrt(delta);
+        let q = P::scalar(-0.5) * (b + mult_sign::<P>(d, b));
         let rv0 = q / a;
         let rv1 = c / q;
-        let r0 = rv0.min(rv1);
-        let r1 = rv0.max(rv1);
+        let r0 = P::min(rv0, rv1);
+        let r1 = P::max(rv1, rv0);
         let r0i = (r0 >= x0 && r0 <= x1) as usize;
         let r1i = (r1 >= x0 && r1 <= x1) as usize;
         roots[0] = r0;
         roots[r0i as usize] = r1;
         r0i + r1i
-    } else if delta < 0.0 {
+    } else if delta < P::scalar(0.0) {
         0
     } else {
-        let r0 = -0.5 * b / a;
+        let r0 = P::scalar(-0.5) * b / a;
         roots[0] = r0;
         (r0 >= x0 && r0 <= x1) as usize
     }
@@ -280,23 +324,29 @@ fn quadratic_roots_bounded(coef: &[f64], roots: &mut [f64], x0: f64, x1: f64) ->
 
 // ---- Cubic roots ----
 
-fn cubic_roots_bounded(coef: &[f64], roots: &mut [f64], x0: f64, x1: f64, x_error: f64) -> usize {
-    let y0 = eval(coef, x0);
-    let y1 = eval(coef, x1);
-    let a = coef[3] * 3.0;
+fn cubic_roots_bounded<P: ScalarAdaptor>(
+    coef: &[P::Float],
+    roots: &mut [P::Float],
+    x0: P::Float,
+    x1: P::Float,
+    x_error: P::Float,
+) -> usize {
+    let y0 = eval::<P>(coef, x0);
+    let y1 = eval::<P>(coef, x1);
+    let a = coef[3] * P::scalar(3.0);
     let b_2 = coef[2];
     let c = coef[1];
     let delta_4 = b_2 * b_2 - a * c;
-    if delta_4 > 0.0 {
-        let d_2 = delta_4.sqrt();
-        let q = -(b_2 + mult_sign(d_2, b_2));
+    if delta_4 > P::scalar(0.0) {
+        let d_2 = P::sqrt(delta_4);
+        let q = -(b_2 + mult_sign::<P>(d_2, b_2));
         let rv0 = q / a;
         let rv1 = c / q;
-        let xa = rv0.min(rv1);
-        let xb = rv0.max(rv1);
-        if is_different_sign(y0, y1) {
+        let xa = P::min(rv0, rv1);
+        let xb = P::max(rv0, rv1);
+        if is_different_sign::<P>(y0, y1) {
             if xa >= x1 || xb <= x0 || (xa <= x0 && xb >= x1) {
-                roots[0] = find_closed(coef, x0, x1, y0, x_error);
+                roots[0] = find_closed::<P>(coef, x0, x1, y0, x_error);
                 return 1;
             }
         } else if (xa >= x1 || xb <= x0) || (xa <= x0 && xb >= x1) {
@@ -304,59 +354,67 @@ fn cubic_roots_bounded(coef: &[f64], roots: &mut [f64], x0: f64, x1: f64, x_erro
         }
         let num_roots = 0usize;
         if xa > x0 {
-            let ya = eval(coef, xa);
-            if is_different_sign(y0, ya) {
-                roots[0] = find_closed(coef, x0, xa, y0, x_error);
-                if is_different_sign(ya, y1) || (xb < x1 && is_different_sign(ya, eval(coef, xb))) {
-                    let mut def_poly = [0.0; 4];
-                    deflate(coef, roots[0], &mut def_poly[..3]);
-                    return quadratic_roots_bounded(&def_poly[..3], &mut roots[1..], xa, x1) + 1;
+            let ya = eval::<P>(coef, xa);
+            if is_different_sign::<P>(y0, ya) {
+                roots[0] = find_closed::<P>(coef, x0, xa, y0, x_error);
+                if is_different_sign::<P>(ya, y1)
+                    || (xb < x1 && is_different_sign::<P>(ya, eval::<P>(coef, xb)))
+                {
+                    let mut def_poly = [P::scalar(0.0); 4];
+                    deflate::<P>(coef, roots[0], &mut def_poly[..3]);
+                    return quadratic_roots_bounded::<P>(&def_poly[..3], &mut roots[1..], xa, x1)
+                        + 1;
                 } else {
                     return 1;
                 }
             }
             if xb < x1 {
-                let yb = eval(coef, xb);
-                if is_different_sign(ya, yb) {
-                    roots[0] = find_closed(coef, xa, xb, ya, x_error);
-                    if is_different_sign(yb, y1) {
-                        let mut def_poly = [0.0; 4];
-                        deflate(coef, roots[0], &mut def_poly[..3]);
-                        return quadratic_roots_bounded(&def_poly[..3], &mut roots[1..], xb, x1)
-                            + 1;
+                let yb = eval::<P>(coef, xb);
+                if is_different_sign::<P>(ya, yb) {
+                    roots[0] = find_closed::<P>(coef, xa, xb, ya, x_error);
+                    if is_different_sign::<P>(yb, y1) {
+                        let mut def_poly = [P::scalar(0.0); 4];
+                        deflate::<P>(coef, roots[0], &mut def_poly[..3]);
+                        return quadratic_roots_bounded::<P>(
+                            &def_poly[..3],
+                            &mut roots[1..],
+                            xb,
+                            x1,
+                        ) + 1;
                     } else {
                         return 1;
                     }
                 }
-                if is_different_sign(yb, y1) {
-                    roots[0] = find_closed(coef, xb, x1, yb, x_error);
+                if is_different_sign::<P>(yb, y1) {
+                    roots[0] = find_closed::<P>(coef, xb, x1, yb, x_error);
                     return 1;
                 }
-            } else if is_different_sign(ya, y1) {
-                roots[0] = find_closed(coef, xa, x1, ya, x_error);
+            } else if is_different_sign::<P>(ya, y1) {
+                roots[0] = find_closed::<P>(coef, xa, x1, ya, x_error);
                 return 1;
             }
         } else {
-            let yb = eval(coef, xb);
-            if is_different_sign(y0, yb) {
-                roots[0] = find_closed(coef, x0, xb, y0, x_error);
-                if is_different_sign(yb, y1) {
-                    let mut def_poly = [0.0; 4];
-                    deflate(coef, roots[0], &mut def_poly[..3]);
-                    return quadratic_roots_bounded(&def_poly[..3], &mut roots[1..], xb, x1) + 1;
+            let yb = eval::<P>(coef, xb);
+            if is_different_sign::<P>(y0, yb) {
+                roots[0] = find_closed::<P>(coef, x0, xb, y0, x_error);
+                if is_different_sign::<P>(yb, y1) {
+                    let mut def_poly = [P::scalar(0.0); 4];
+                    deflate::<P>(coef, roots[0], &mut def_poly[..3]);
+                    return quadratic_roots_bounded::<P>(&def_poly[..3], &mut roots[1..], xb, x1)
+                        + 1;
                 } else {
                     return 1;
                 }
             }
-            if is_different_sign(yb, y1) {
-                roots[0] = find_closed(coef, xb, x1, yb, x_error);
+            if is_different_sign::<P>(yb, y1) {
+                roots[0] = find_closed::<P>(coef, xb, x1, yb, x_error);
                 return 1;
             }
         }
         num_roots
     } else {
-        if is_different_sign(y0, y1) {
-            roots[0] = find_closed(coef, x0, x1, y0, x_error);
+        if is_different_sign::<P>(y0, y1) {
+            roots[0] = find_closed::<P>(coef, x0, x1, y0, x_error);
             1
         } else {
             0
@@ -364,89 +422,93 @@ fn cubic_roots_bounded(coef: &[f64], roots: &mut [f64], x0: f64, x1: f64, x_erro
     }
 }
 
-fn cubic_roots_unbounded(coef: &[f64], roots: &mut [f64], x_error: f64) -> usize {
-    if coef[3] != 0.0 {
-        let a = coef[3] * 3.0;
+fn cubic_roots_unbounded<P: ScalarAdaptor>(
+    coef: &[P::Float],
+    roots: &mut [P::Float],
+    x_error: P::Float,
+) -> usize {
+    if coef[3] != P::scalar(0.0) {
+        let a = coef[3] * P::scalar(3.0);
         let b_2 = coef[2];
         let c = coef[1];
-        let deriv = [c, 2.0 * b_2, a, 0.0];
+        let deriv = [c, P::scalar(2.0) * b_2, a, P::scalar(0.0)];
         let delta_4 = b_2 * b_2 - a * c;
-        if delta_4 > 0.0 {
-            let d_2 = delta_4.sqrt();
-            let q = -(b_2 + mult_sign(d_2, b_2));
+        if delta_4 > P::scalar(0.0) {
+            let d_2 = P::sqrt(delta_4);
+            let q = -(b_2 + mult_sign::<P>(d_2, b_2));
             let rv0 = q / a;
             let rv1 = c / q;
-            let xa = rv0.min(rv1);
-            let xb = rv0.max(rv1);
-            let ya = eval(coef, xa);
-            let yb = eval(coef, xb);
-            if !is_different_sign(coef[3], ya) {
-                roots[0] = find_open_min(coef, &deriv, xa, ya, x_error);
-                if is_different_sign(ya, yb) {
-                    let mut def_poly = [0.0; 4];
-                    deflate(coef, roots[0], &mut def_poly[..3]);
-                    return quadratic_roots_unbounded(&def_poly[..3], &mut roots[1..]) + 1;
+            let xa = P::min(rv0, rv1);
+            let xb = P::max(rv0, rv1);
+            let ya = eval::<P>(coef, xa);
+            let yb = eval::<P>(coef, xb);
+            if !is_different_sign::<P>(coef[3], ya) {
+                roots[0] = find_open_min::<P>(coef, &deriv, xa, ya, x_error);
+                if is_different_sign::<P>(ya, yb) {
+                    let mut def_poly = [P::scalar(0.0); 4];
+                    deflate::<P>(coef, roots[0], &mut def_poly[..3]);
+                    return quadratic_roots_unbounded::<P>(&def_poly[..3], &mut roots[1..]) + 1;
                 }
             } else {
-                roots[0] = find_open_max(coef, &deriv, xb, yb, x_error);
+                roots[0] = find_open_max::<P>(coef, &deriv, xb, yb, x_error);
             }
             1
         } else {
             let x_inf = -b_2 / a;
-            let y_inf = eval(coef, x_inf);
-            if is_different_sign(coef[3], y_inf) {
-                roots[0] = find_open_max(coef, &deriv, x_inf, y_inf, x_error);
+            let y_inf = eval::<P>(coef, x_inf);
+            if is_different_sign::<P>(coef[3], y_inf) {
+                roots[0] = find_open_max::<P>(coef, &deriv, x_inf, y_inf, x_error);
             } else {
-                roots[0] = find_open_min(coef, &deriv, x_inf, y_inf, x_error);
+                roots[0] = find_open_min::<P>(coef, &deriv, x_inf, y_inf, x_error);
             }
             1
         }
     } else {
-        quadratic_roots_unbounded(coef, roots)
+        quadratic_roots_unbounded::<P>(coef, roots)
     }
 }
 
 // ---- General polynomial roots (degree N >= 4) ----
 
-fn polynomial_roots_bounded(
-    coef: &[f64],
-    roots: &mut [f64],
-    x0: f64,
-    x1: f64,
-    x_error: f64,
+fn polynomial_roots_bounded<P: ScalarAdaptor>(
+    coef: &[P::Float],
+    roots: &mut [P::Float],
+    x0: P::Float,
+    x1: P::Float,
+    x_error: P::Float,
 ) -> usize {
     let n = coef.len() - 1; // degree
     match n {
         1 => {
-            let (r, count) = linear_root_bounded(coef, x0, x1);
+            let (r, count) = linear_root_bounded::<P>(coef, x0, x1);
             roots[0] = r;
             count
         }
-        2 => quadratic_roots_bounded(coef, roots, x0, x1),
-        3 => cubic_roots_bounded(coef, roots, x0, x1, x_error),
+        2 => quadratic_roots_bounded::<P>(coef, roots, x0, x1),
+        3 => cubic_roots_bounded::<P>(coef, roots, x0, x1, x_error),
         _ => {
-            if coef[n] == 0.0 {
-                return polynomial_roots_bounded(&coef[..n], roots, x0, x1, x_error);
+            if coef[n] == P::scalar(0.0) {
+                return polynomial_roots_bounded::<P>(&coef[..n], roots, x0, x1, x_error);
             }
-            let y0 = eval(coef, x0);
-            let mut deriv = [0.0; 16]; // max degree 16 -> 16 derivative coeffs
-            differentiate(coef, &mut deriv[..n]);
-            let mut deriv_roots = [0.0; 15];
-            let nd = polynomial_roots_bounded(&deriv[..n], &mut deriv_roots, x0, x1, x_error);
-            let mut x = [0.0; 17]; // max 16+1 = 17 entries
-            let mut y = [0.0; 17];
+            let y0 = eval::<P>(coef, x0);
+            let mut deriv = [P::scalar(0.0); 16]; // max degree 16 -> 16 derivative coeffs
+            differentiate::<P>(coef, &mut deriv[..n]);
+            let mut deriv_roots = [P::scalar(0.0); 15];
+            let nd = polynomial_roots_bounded::<P>(&deriv[..n], &mut deriv_roots, x0, x1, x_error);
+            let mut x = [P::scalar(0.0); 17]; // max 16+1 = 17 entries
+            let mut y = [P::scalar(0.0); 17];
             x[0] = x0;
             y[0] = y0;
             for i in 0..nd as usize {
                 x[i + 1] = deriv_roots[i];
-                y[i + 1] = eval(coef, deriv_roots[i]);
+                y[i + 1] = eval::<P>(coef, deriv_roots[i]);
             }
             x[nd as usize + 1] = x1;
-            y[nd as usize + 1] = eval(coef, x1);
+            y[nd as usize + 1] = eval::<P>(coef, x1);
             let mut nr = 0usize;
             for i in 0..=nd as usize {
-                if is_different_sign(y[i], y[i + 1]) {
-                    roots[nr as usize] = find_closed(coef, x[i], x[i + 1], y[i], x_error);
+                if is_different_sign::<P>(y[i], y[i + 1]) {
+                    roots[nr as usize] = find_closed::<P>(coef, x[i], x[i + 1], y[i], x_error);
                     nr += 1;
                 }
             }
@@ -455,49 +517,53 @@ fn polynomial_roots_bounded(
     }
 }
 
-fn polynomial_roots_unbounded(coef: &[f64], roots: &mut [f64], x_error: f64) -> usize {
+fn polynomial_roots_unbounded<P: ScalarAdaptor>(
+    coef: &[P::Float],
+    roots: &mut [P::Float],
+    x_error: P::Float,
+) -> usize {
     let n = coef.len() - 1; // degree
     match n {
         1 => {
-            let (r, count) = linear_root_unbounded(coef);
+            let (r, count) = linear_root_unbounded::<P>(coef);
             roots[0] = r;
             count
         }
-        2 => quadratic_roots_unbounded(coef, roots),
-        3 => cubic_roots_unbounded(coef, roots, x_error),
+        2 => quadratic_roots_unbounded::<P>(coef, roots),
+        3 => cubic_roots_unbounded::<P>(coef, roots, x_error),
         _ => {
-            if coef[n] == 0.0 {
-                return polynomial_roots_unbounded(&coef[..n], roots, x_error);
+            if coef[n] == P::scalar(0.0) {
+                return polynomial_roots_unbounded::<P>(&coef[..n], roots, x_error);
             }
-            let mut deriv = [0.0; 16];
-            differentiate(coef, &mut deriv[..n]);
-            let mut deriv_roots = [0.0; 15];
-            let nd = polynomial_roots_unbounded(&deriv[..n], &mut deriv_roots, x_error);
+            let mut deriv = [P::scalar(0.0); 16];
+            differentiate::<P>(coef, &mut deriv[..n]);
+            let mut deriv_roots = [P::scalar(0.0); 15];
+            let nd = polynomial_roots_unbounded::<P>(&deriv[..n], &mut deriv_roots, x_error);
             if (n & 1 == 1) || (n & 1 == 0 && nd > 0) {
                 let mut nr = 0usize;
                 let mut xa = deriv_roots[0];
-                let mut ya = eval(coef, xa);
-                if is_different_sign(coef[n], ya) != (n & 1 == 1) {
-                    roots[0] = find_open_min(coef, &deriv[..n], xa, ya, x_error);
+                let mut ya = eval::<P>(coef, xa);
+                if is_different_sign::<P>(coef[n], ya) != (n & 1 == 1) {
+                    roots[0] = find_open_min::<P>(coef, &deriv[..n], xa, ya, x_error);
                     nr = 1;
                 }
                 for i in 1..nd as usize {
                     let xb = deriv_roots[i];
-                    let yb = eval(coef, xb);
-                    if is_different_sign(ya, yb) {
-                        roots[nr as usize] = find_closed(coef, xa, xb, ya, x_error);
+                    let yb = eval::<P>(coef, xb);
+                    if is_different_sign::<P>(ya, yb) {
+                        roots[nr as usize] = find_closed::<P>(coef, xa, xb, ya, x_error);
                         nr += 1;
                     }
                     xa = xb;
                     ya = yb;
                 }
-                if is_different_sign(coef[n], ya) {
-                    roots[nr as usize] = find_open_max(coef, &deriv[..n], xa, ya, x_error);
+                if is_different_sign::<P>(coef[n], ya) {
+                    roots[nr as usize] = find_open_max::<P>(coef, &deriv[..n], xa, ya, x_error);
                     nr += 1;
                 }
                 nr
             } else if n & 1 == 1 {
-                roots[0] = find_open(coef, &deriv[..n], x_error);
+                roots[0] = find_open::<P>(coef, &deriv[..n], x_error);
                 1
             } else {
                 0 // should not happen
@@ -507,7 +573,10 @@ fn polynomial_roots_unbounded(coef: &[f64], roots: &mut [f64], x_error: f64) -> 
 }
 
 #[inline(always)]
-fn handle_trivial_cases(coeff: &[f64], roots: &mut [f64]) -> Result<Option<usize>, Error> {
+fn handle_trivial_cases<P: ScalarAdaptor>(
+    coeff: &[P::Float],
+    roots: &mut [P::Float],
+) -> Result<Option<usize>, Error> {
     if coeff.len() < 2 {
         return Ok(Some(0usize));
     }
@@ -532,36 +601,41 @@ fn handle_trivial_cases(coeff: &[f64], roots: &mut [f64]) -> Result<Option<usize
 /// `coef`: slice of length degree+1, coef[0] + coef[1]*x + ... + coef[N]*x^N
 /// `roots`: output slice, must have length >= degree
 /// `x_error`: positional error tolerance (use `DEFAULT_ERROR` for the default)
-pub fn find_roots(coeff: &[f64], roots: &mut [f64], x_error: f64) -> Result<usize, Error> {
-    match handle_trivial_cases(coeff, roots)? {
-        Some(n) => return Ok(n),
-        None => {}
+pub fn find_roots<P: ScalarAdaptor>(
+    coeff: &[P::Float],
+    roots: &mut [P::Float],
+    x_error: P::Float,
+) -> Result<usize, Error> {
+    match handle_trivial_cases::<P>(coeff, roots) {
+        Ok(Some(n)) => Ok(n),
+        Ok(None) => Ok(polynomial_roots_unbounded::<P>(coeff, roots, x_error)),
+        Err(e) => Err(e),
     }
-    Ok(polynomial_roots_unbounded(coeff, roots, x_error))
 }
 
 /// Finds all real roots of a polynomial within [x_min, x_max].
 /// Returns the number of roots found.
-pub fn find_roots_in_range(
-    coeff: &[f64],
-    roots: &mut [f64],
-    x_min: f64,
-    x_max: f64,
-    x_error: f64,
+pub fn find_roots_in_range<P: ScalarAdaptor>(
+    coeff: &[P::Float],
+    roots: &mut [P::Float],
+    x_min: P::Float,
+    x_max: P::Float,
+    x_error: P::Float,
 ) -> Result<usize, Error> {
-    match handle_trivial_cases(coeff, roots)? {
-        Some(n) => return Ok(n),
-        None => {}
+    match handle_trivial_cases::<P>(coeff, roots) {
+        Ok(Some(n)) => Ok(n),
+        Ok(None) => Ok(polynomial_roots_bounded::<P>(
+            coeff, roots, x_min, x_max, x_error,
+        )),
+        Err(e) => Err(e),
     }
-    Ok(polynomial_roots_bounded(
-        coeff, roots, x_min, x_max, x_error,
-    ))
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-
+    use crate::vec::F64Adaptor;
+    pub const DEFAULT_ERROR: f64 = 6e-7;
     const TOL: f64 = 1e-6;
 
     /// Verify that each reported root actually evaluates close to zero.
@@ -569,9 +643,13 @@ mod test {
         // Scale tolerance by the polynomial's coefficient magnitude so that
         // polynomials with large coefficients (or roots near zero where high-
         // degree terms dominate) don't produce false negatives.
-        let coef_scale: f64 = coef.iter().map(|c| c.abs()).fold(0.0f64, f64::max).max(1.0);
+        let coef_scale: f64 = coef
+            .iter()
+            .map(|c| c.abs())
+            .fold(0.0_f64, f64::max)
+            .max(1.0);
         for i in 0..n as usize {
-            let val = eval(coef, roots[i]);
+            let val = eval::<F64Adaptor>(coef, roots[i]);
             let scale = coef_scale * (1.0 + roots[i].abs().powi(coef.len() as i32 - 1));
             assert!(
                 val.abs() < TOL * scale,
@@ -654,7 +732,7 @@ mod test {
             let mut coef = vec![0.0; degree + 1];
             poly_from_roots(&known, &mut coef);
             let mut roots = vec![0.0; degree];
-            let n = find_roots(&coef, &mut roots, DEFAULT_ERROR).unwrap();
+            let n = find_roots::<F64Adaptor>(&coef, &mut roots, DEFAULT_ERROR).unwrap();
             assert_eq!(
                 n as usize, degree,
                 "expected {} roots for known roots {:?}, got {}",
@@ -666,37 +744,37 @@ mod test {
 
     #[test]
     fn t_eval() {
-        assert_eq!(eval(&[42.0], 999.0), 42.0); // constant
-        assert_eq!(eval(&[3.0, 2.0], 5.0), 13.0); // linear: 3 + 2x at x=5 -> 13
-        assert_eq!(eval(&[1.0, -3.0, 2.0], 2.0), 3.0); // quadratic: 1 - 3x + 2x^2 at x=2 -> 1 - 6 + 8 = 3
-        assert_eq!(eval(&[7.0, 1.0, 2.0, 3.0], 0.0), 7.0); // at zero: constant term dominates
+        assert_eq!(eval::<F64Adaptor>(&[42.0], 999.0), 42.0); // constant
+        assert_eq!(eval::<F64Adaptor>(&[3.0, 2.0], 5.0), 13.0); // linear: 3 + 2x at x=5 -> 13
+        assert_eq!(eval::<F64Adaptor>(&[1.0, -3.0, 2.0], 2.0), 3.0); // quadratic: 1 - 3x + 2x^2 at x=2 -> 1 - 6 + 8 = 3
+        assert_eq!(eval::<F64Adaptor>(&[7.0, 1.0, 2.0, 3.0], 0.0), 7.0); // at zero: constant term dominates
     }
 
     #[test]
     fn t_eval_with_deriv_basic() {
-        let (f, d) = eval_with_deriv(&[7.0], 3.0); // constant: f(x) = 7, f'(x) = 0
+        let (f, d) = eval_with_deriv::<F64Adaptor>(&[7.0], 3.0); // constant: f(x) = 7, f'(x) = 0
         assert_eq!(f, 7.0);
         assert_eq!(d, 0.0);
-        let (f, d) = eval_with_deriv(&[3.0, 2.0], 5.0); // linear: f(x) = 3 + 2x, f'(x) = 2 at x=5
+        let (f, d) = eval_with_deriv::<F64Adaptor>(&[3.0, 2.0], 5.0); // linear: f(x) = 3 + 2x, f'(x) = 2 at x=5
         assert_eq!(f, 13.0);
         assert_eq!(d, 2.0);
-        let (f, d) = eval_with_deriv(&[1.0, -3.0, 2.0], 2.0); // quadratic: f(x) = 1 - 3x + 2x^2, f'(x) = -3 + 4x at x=2
+        let (f, d) = eval_with_deriv::<F64Adaptor>(&[1.0, -3.0, 2.0], 2.0); // quadratic: f(x) = 1 - 3x + 2x^2, f'(x) = -3 + 4x at x=2
         assert_eq!(f, 3.0);
         assert_eq!(d, 5.0);
-        let (f, d) = eval_with_deriv(&[2.0, 0.0, 0.0, 1.0], 3.0); // cubic: f(x) = 2 + x^3, f'(x) = 3x^2 at x=3
+        let (f, d) = eval_with_deriv::<F64Adaptor>(&[2.0, 0.0, 0.0, 1.0], 3.0); // cubic: f(x) = 2 + x^3, f'(x) = 3x^2 at x=3
         assert_eq!(f, 29.0);
         assert_eq!(d, 27.0);
-        let (f, d) = eval_with_deriv(&[5.0, 3.0, 2.0, 1.0], 0.0); // at zero: f(x) = 5 + 3x + 2x^2 + x^3, f'(0) = 3
+        let (f, d) = eval_with_deriv::<F64Adaptor>(&[5.0, 3.0, 2.0, 1.0], 0.0); // at zero: f(x) = 5 + 3x + 2x^2 + x^3, f'(0) = 3
         assert_eq!(f, 5.0);
         assert_eq!(d, 3.0);
-        let (f, d) = eval_with_deriv(&[1.0, 1.0, 1.0], -3.0); // negative x: f(x) = 1 + x + x^2, f'(x) = 1 + 2x at x=-3
+        let (f, d) = eval_with_deriv::<F64Adaptor>(&[1.0, 1.0, 1.0], -3.0); // negative x: f(x) = 1 + x + x^2, f'(x) = 1 + 2x at x=-3
         assert_eq!(f, 7.0);
         assert_eq!(d, -5.0);
         let coef = [2.0, -3.0, 1.0]; // at roots: f(x) = (x-1)(x-2) = 2 - 3x + x^2
-        let (f, d) = eval_with_deriv(&coef, 1.0);
+        let (f, d) = eval_with_deriv::<F64Adaptor>(&coef, 1.0);
         assert_eq!(f, 0.0);
         assert_eq!(d, -1.0);
-        let (f, d) = eval_with_deriv(&coef, 2.0);
+        let (f, d) = eval_with_deriv::<F64Adaptor>(&coef, 2.0);
         assert_eq!(f, 0.0);
         assert_eq!(d, 1.0);
     }
@@ -705,13 +783,13 @@ mod test {
     fn t_eval_with_deriv_edge_cases() {
         let mut coef = [0.0; 11]; // high degree: x^10 at x=2
         coef[10] = 1.0;
-        let (f, d) = eval_with_deriv(&coef, 2.0);
+        let (f, d) = eval_with_deriv::<F64Adaptor>(&coef, 2.0);
         assert_eq!(f, 1024.0);
         assert_eq!(d, 5120.0);
-        let (f, d) = eval_with_deriv(&[1e12, 1e12], 1e6); // large coefficients: f(x) = 1e12 + 1e12*x at x=1e6
+        let (f, d) = eval_with_deriv::<F64Adaptor>(&[1e12, 1e12], 1e6); // large coefficients: f(x) = 1e12 + 1e12*x at x=1e6
         assert_eq!(f, 1e12 + 1e18);
         assert_eq!(d, 1e12);
-        let (f, d) = eval_with_deriv(&[1.0, 1.0, 1.0], 1e-15); // tiny x: f(x) = 1 + x + x^2 at x=1e-15
+        let (f, d) = eval_with_deriv::<F64Adaptor>(&[1.0, 1.0, 1.0], 1e-15); // tiny x: f(x) = 1 + x + x^2 at x=1e-15
         assert!((f - 1.0).abs() < 1e-10);
         assert!((d - 1.0).abs() < 1e-10);
     }
@@ -726,11 +804,11 @@ mod test {
         ];
         for &(coef, xs) in cases {
             let mut deriv_coef = vec![0.0; coef.len() - 1];
-            differentiate(coef, &mut deriv_coef);
+            differentiate::<F64Adaptor>(coef, &mut deriv_coef);
             for &x in xs {
-                let (f, d) = eval_with_deriv(coef, x);
-                let f_expected = eval(coef, x);
-                let d_expected = eval(&deriv_coef, x);
+                let (f, d) = eval_with_deriv::<F64Adaptor>(coef, x);
+                let f_expected = eval::<F64Adaptor>(coef, x);
+                let d_expected = eval::<F64Adaptor>(&deriv_coef, x);
                 assert!(
                     (f - f_expected).abs() < 1e-10,
                     "f mismatch at x={}: got {}, expected {}, coef={:?}",
@@ -754,17 +832,17 @@ mod test {
     #[test]
     fn t_differentiate() {
         let mut d = [0.0; 2]; // quadratic: 1 + 2x + 3x^2 -> 2 + 6x
-        differentiate(&[1.0, 2.0, 3.0], &mut d);
+        differentiate::<F64Adaptor>(&[1.0, 2.0, 3.0], &mut d);
         assert_eq!(d, [2.0, 6.0]);
         let mut d = [0.0; 3]; // cubic: 5 + x^3 -> 3x^2
-        differentiate(&[5.0, 0.0, 0.0, 1.0], &mut d);
+        differentiate::<F64Adaptor>(&[5.0, 0.0, 0.0, 1.0], &mut d);
         assert_eq!(d, [0.0, 0.0, 3.0]);
     }
 
     #[test]
     fn t_deflate_known_root() {
         let mut def = [0.0; 2]; // (x-1)(x-2) = 2 - 3x + x^2, deflate by root=1 -> (x-2) = -2 + x
-        deflate(&[2.0, -3.0, 1.0], 1.0, &mut def);
+        deflate::<F64Adaptor>(&[2.0, -3.0, 1.0], 1.0, &mut def);
         assert!((def[0] - (-2.0)).abs() < 1e-12);
         assert!((def[1] - 1.0).abs() < 1e-12);
     }
@@ -773,18 +851,22 @@ mod test {
     fn t_linear_roots() {
         // 6 + 2x = 0 -> x = -3
         let mut roots = [0.0; 1];
-        let n = find_roots(&[6.0, 2.0], &mut roots, DEFAULT_ERROR).unwrap();
+        let n = find_roots::<F64Adaptor>(&[6.0, 2.0], &mut roots, DEFAULT_ERROR).unwrap();
         assert_eq!(n, 1);
         assert!((roots[0] - (-3.0)).abs() < TOL);
         // zero slope: 5 + 0x -> no root
-        let n = find_roots(&[5.0, 0.0], &mut roots, DEFAULT_ERROR).unwrap();
+        let n = find_roots::<F64Adaptor>(&[5.0, 0.0], &mut roots, DEFAULT_ERROR).unwrap();
         assert_eq!(n, 0);
         // bounded inside: -2 + x = 0 -> x = 2, within [0, 10]
-        let n = find_roots_in_range(&[-2.0, 1.0], &mut roots, 0.0, 10.0, DEFAULT_ERROR).unwrap();
+        let n =
+            find_roots_in_range::<F64Adaptor>(&[-2.0, 1.0], &mut roots, 0.0, 10.0, DEFAULT_ERROR)
+                .unwrap();
         assert_eq!(n, 1);
         assert!((roots[0] - 2.0).abs() < TOL);
         // bounded outside: -20 + x = 0 -> x = 20, outside [0, 10]
-        let n = find_roots_in_range(&[-20.0, 1.0], &mut roots, 0.0, 10.0, DEFAULT_ERROR).unwrap();
+        let n =
+            find_roots_in_range::<F64Adaptor>(&[-20.0, 1.0], &mut roots, 0.0, 10.0, DEFAULT_ERROR)
+                .unwrap();
         assert_eq!(n, 0);
     }
 
@@ -792,32 +874,32 @@ mod test {
     fn t_quadratic_roots() {
         let coef = [3.0, -4.0, 1.0]; // two distinct roots: (x-1)(x-3)
         let mut roots = [0.0; 2];
-        let n = find_roots(&coef, &mut roots, DEFAULT_ERROR).unwrap();
+        let n = find_roots::<F64Adaptor>(&coef, &mut roots, DEFAULT_ERROR).unwrap();
         assert_eq!(n, 2);
         verify_roots(&coef, &roots, n);
         verify_sorted(&roots, n);
         assert!((roots[0] - 1.0).abs() < TOL);
         assert!((roots[1] - 3.0).abs() < TOL);
-        let n = find_roots(&[4.0, -4.0, 1.0], &mut roots, DEFAULT_ERROR).unwrap(); // double root: (x-2)^2
+        let n = find_roots::<F64Adaptor>(&[4.0, -4.0, 1.0], &mut roots, DEFAULT_ERROR).unwrap(); // double root: (x-2)^2
         assert_eq!(n, 1);
         assert!((roots[0] - 2.0).abs() < TOL);
-        let n = find_roots(&[1.0, 0.0, 1.0], &mut roots, DEFAULT_ERROR).unwrap(); // no real roots: x^2 + 1
+        let n = find_roots::<F64Adaptor>(&[1.0, 0.0, 1.0], &mut roots, DEFAULT_ERROR).unwrap(); // no real roots: x^2 + 1
         assert_eq!(n, 0);
         let coef = [-5.0, 6.0, -1.0]; // negative leading: -(x-1)(x-5) = -x^2 + 6x - 5
-        let n = find_roots(&coef, &mut roots, DEFAULT_ERROR).unwrap();
+        let n = find_roots::<F64Adaptor>(&coef, &mut roots, DEFAULT_ERROR).unwrap();
         assert_eq!(n, 2);
         verify_roots(&coef, &roots, n);
         verify_sorted(&roots, n);
         assert!((roots[0] - 1.0).abs() < TOL);
         assert!((roots[1] - 5.0).abs() < TOL);
         let coef = [-1_000_000.0, 0.0, 1.0]; // large roots: (x-1000)(x+1000) = x^2 - 1e6
-        let n = find_roots(&coef, &mut roots, DEFAULT_ERROR).unwrap();
+        let n = find_roots::<F64Adaptor>(&coef, &mut roots, DEFAULT_ERROR).unwrap();
         assert_eq!(n, 2);
         verify_roots(&coef, &roots, n);
         assert!((roots[0] - (-1000.0)).abs() < 0.01);
         assert!((roots[1] - 1000.0).abs() < 0.01);
         let coef = [-1e-16, 0.0, 1.0]; // small roots: (x-1e-8)(x+1e-8) = x^2 - 1e-16
-        let n = find_roots(&coef, &mut roots, DEFAULT_ERROR).unwrap();
+        let n = find_roots::<F64Adaptor>(&coef, &mut roots, DEFAULT_ERROR).unwrap();
         assert_eq!(n, 2);
         verify_roots(&coef, &roots, n);
     }
@@ -826,13 +908,25 @@ mod test {
     fn t_quadratic_bounded() {
         let mut roots = [0.0; 2];
         // (x-1)(x-10), range [0,5] -> only root at 1
-        let n =
-            find_roots_in_range(&[10.0, -11.0, 1.0], &mut roots, 0.0, 5.0, DEFAULT_ERROR).unwrap();
+        let n = find_roots_in_range::<F64Adaptor>(
+            &[10.0, -11.0, 1.0],
+            &mut roots,
+            0.0,
+            5.0,
+            DEFAULT_ERROR,
+        )
+        .unwrap();
         assert_eq!(n, 1);
         assert!((roots[0] - 1.0).abs() < TOL);
         // (x-1)(x-3), range [5,10] -> no roots
-        let n =
-            find_roots_in_range(&[3.0, -4.0, 1.0], &mut roots, 5.0, 10.0, DEFAULT_ERROR).unwrap();
+        let n = find_roots_in_range::<F64Adaptor>(
+            &[3.0, -4.0, 1.0],
+            &mut roots,
+            5.0,
+            10.0,
+            DEFAULT_ERROR,
+        )
+        .unwrap();
         assert_eq!(n, 0);
     }
 
@@ -840,42 +934,43 @@ mod test {
     fn t_cubic_roots() {
         let mut roots = [0.0; 3];
         let coef = [6.0, -5.0, -2.0, 1.0]; // three distinct roots: (x+2)(x-1)(x-3) = x^3 - 2x^2 - 5x + 6
-        let n = find_roots(&coef, &mut roots, DEFAULT_ERROR).unwrap();
+        let n = find_roots::<F64Adaptor>(&coef, &mut roots, DEFAULT_ERROR).unwrap();
         assert_eq!(n, 3);
         verify_roots(&coef, &roots, n);
         verify_sorted(&roots, n);
         verify_expected_roots(&[-2.0, 1.0, 3.0], &roots, n);
         let coef = [2.0, 1.0, 0.0, 1.0]; // one real root: x^3 + x + 2
-        let n = find_roots(&coef, &mut roots, DEFAULT_ERROR).unwrap();
+        let n = find_roots::<F64Adaptor>(&coef, &mut roots, DEFAULT_ERROR).unwrap();
         assert_eq!(n, 1);
         verify_roots(&coef, &roots, n);
         let coef = [0.0, 0.0, 0.0, 1.0]; // triple root at zero: x^3 = 0
-        let n = find_roots(&coef, &mut roots, DEFAULT_ERROR).unwrap();
+        let n = find_roots::<F64Adaptor>(&coef, &mut roots, DEFAULT_ERROR).unwrap();
         assert!(n >= 1);
         assert!(roots[0].abs() < 2e-6, "root = {} too far from 0", roots[0]);
         let coef = [-1.0, 0.0, 1.0, 0.0]; // degenerates to quadratic: 0*x^3 + x^2 - 1 = 0
-        let n = find_roots(&coef, &mut roots, DEFAULT_ERROR).unwrap();
+        let n = find_roots::<F64Adaptor>(&coef, &mut roots, DEFAULT_ERROR).unwrap();
         assert_eq!(n, 2);
         verify_roots(&coef[..3], &roots, n);
         let coef = [-6.0, 5.0, 2.0, -1.0]; // negative leading: -(x+2)(x-1)(x-3)
-        let n = find_roots(&coef, &mut roots, DEFAULT_ERROR).unwrap();
+        let n = find_roots::<F64Adaptor>(&coef, &mut roots, DEFAULT_ERROR).unwrap();
         assert_eq!(n, 3);
         verify_roots(&coef, &roots, n);
         verify_expected_roots(&[-2.0, 1.0, 3.0], &roots, n);
         let known = [0.1, 0.2, 0.3]; // clustered roots: (x-0.1)(x-0.2)(x-0.3)
         let mut coef4 = [0.0; 4];
         poly_from_roots(&known, &mut coef4);
-        let n = find_roots(&coef4, &mut roots, DEFAULT_ERROR).unwrap();
+        let n = find_roots::<F64Adaptor>(&coef4, &mut roots, DEFAULT_ERROR).unwrap();
         assert_eq!(n, 3);
         verify_roots(&coef4, &roots, n);
         verify_expected_roots(&known, &roots, n);
         let coef = [0.0, -10000.0, 0.0, 1.0]; // widely separated: (x+100)(x)(x-100) = x^3 - 10000x
-        let n = find_roots(&coef, &mut roots, DEFAULT_ERROR).unwrap();
+        let n = find_roots::<F64Adaptor>(&coef, &mut roots, DEFAULT_ERROR).unwrap();
         assert_eq!(n, 3);
         verify_roots(&coef, &roots, n);
         verify_expected_roots(&[-100.0, 0.0, 100.0], &roots, n);
         let coef = [6.0, -5.0, -2.0, 1.0]; // bounded: (x+2)(x-1)(x-3), range [0,2] -> only root at 1
-        let n = find_roots_in_range(&coef, &mut roots, 0.0, 2.0, DEFAULT_ERROR).unwrap();
+        let n =
+            find_roots_in_range::<F64Adaptor>(&coef, &mut roots, 0.0, 2.0, DEFAULT_ERROR).unwrap();
         assert_eq!(n, 1);
         assert!((roots[0] - 1.0).abs() < TOL);
     }
@@ -885,27 +980,30 @@ mod test {
         let mut roots = [0.0; 4];
         // four roots: (x+3)(x+1)(x-1)(x-3) = x^4 - 10x^2 + 9
         let coef = [9.0, 0.0, -10.0, 0.0, 1.0];
-        let n = find_roots(&coef, &mut roots, DEFAULT_ERROR).unwrap();
+        let n = find_roots::<F64Adaptor>(&coef, &mut roots, DEFAULT_ERROR).unwrap();
         assert_eq!(n, 4);
         verify_roots(&coef, &roots, n);
         verify_sorted(&roots, n);
         verify_expected_roots(&[-3.0, -1.0, 1.0, 3.0], &roots, n);
         // two real roots: (x^2+1)(x^2-4) = x^4 - 3x^2 - 4
         let coef = [-4.0, 0.0, -3.0, 0.0, 1.0];
-        let n = find_roots(&coef, &mut roots, DEFAULT_ERROR).unwrap();
+        let n = find_roots::<F64Adaptor>(&coef, &mut roots, DEFAULT_ERROR).unwrap();
         assert_eq!(n, 2);
         verify_roots(&coef, &roots, n);
         verify_expected_roots(&[-2.0, 2.0], &roots, n);
         // no real roots: (x^2+1)(x^2+4) = x^4 + 5x^2 + 4
-        let n = find_roots(&[4.0, 0.0, 5.0, 0.0, 1.0], &mut roots, DEFAULT_ERROR).unwrap();
+        let n = find_roots::<F64Adaptor>(&[4.0, 0.0, 5.0, 0.0, 1.0], &mut roots, DEFAULT_ERROR)
+            .unwrap();
         assert_eq!(n, 0);
         // degenerates to cubic: 0*x^4 + (x-1)(x-2)(x-3)
-        let n = find_roots(&[-6.0, 11.0, -6.0, 1.0, 0.0], &mut roots, DEFAULT_ERROR).unwrap();
+        let n = find_roots::<F64Adaptor>(&[-6.0, 11.0, -6.0, 1.0, 0.0], &mut roots, DEFAULT_ERROR)
+            .unwrap();
         assert_eq!(n, 3);
         verify_expected_roots(&[1.0, 2.0, 3.0], &roots, n);
         // bounded: (x+3)(x+1)(x-1)(x-3), range [-2,2] -> roots at -1, 1
         let coef = [9.0, 0.0, -10.0, 0.0, 1.0];
-        let n = find_roots_in_range(&coef, &mut roots, -2.0, 2.0, DEFAULT_ERROR).unwrap();
+        let n =
+            find_roots_in_range::<F64Adaptor>(&coef, &mut roots, -2.0, 2.0, DEFAULT_ERROR).unwrap();
         assert_eq!(n, 2);
         verify_expected_roots(&[-1.0, 1.0], &roots, n);
     }
@@ -916,13 +1014,13 @@ mod test {
         let mut coef = [0.0; 6];
         poly_from_roots(&known, &mut coef);
         let mut roots = [0.0; 5];
-        let n = find_roots(&coef, &mut roots, DEFAULT_ERROR).unwrap();
+        let n = find_roots::<F64Adaptor>(&coef, &mut roots, DEFAULT_ERROR).unwrap();
         assert_eq!(n, 5);
         verify_roots(&coef, &roots, n);
         verify_sorted(&roots, n);
         verify_expected_roots(&known, &roots, n);
         let coef = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0]; // one root: x^5 + 1 = 0 -> x = -1
-        let n = find_roots(&coef, &mut roots, DEFAULT_ERROR).unwrap();
+        let n = find_roots::<F64Adaptor>(&coef, &mut roots, DEFAULT_ERROR).unwrap();
         assert_eq!(n, 1);
         verify_roots(&coef, &roots, n);
         assert!((roots[0] - (-1.0)).abs() < TOL);
@@ -934,7 +1032,7 @@ mod test {
             coef[i] += cubic[i];
             coef[i + 2] += cubic[i];
         }
-        let n = find_roots(&coef, &mut roots, DEFAULT_ERROR).unwrap();
+        let n = find_roots::<F64Adaptor>(&coef, &mut roots, DEFAULT_ERROR).unwrap();
         assert_eq!(n, 3);
         verify_roots(&coef, &roots, n);
         verify_expected_roots(&known_real, &roots, n);
@@ -948,7 +1046,7 @@ mod test {
             let mut coef = vec![0.0; deg + 1];
             poly_from_roots(known, &mut coef);
             let mut roots = vec![0.0; deg];
-            let n = find_roots(&coef, &mut roots, DEFAULT_ERROR).unwrap();
+            let n = find_roots::<F64Adaptor>(&coef, &mut roots, DEFAULT_ERROR).unwrap();
             assert_eq!(
                 n as usize, deg,
                 "degree {} expected {} roots, got {}",
@@ -969,14 +1067,15 @@ mod test {
         // degree 8, no real roots: (x^2+1)^4 = x^8 + 4x^6 + 6x^4 + 4x^2 + 1
         let coef = [1.0, 0.0, 4.0, 0.0, 6.0, 0.0, 4.0, 0.0, 1.0];
         let mut roots = [0.0; 8];
-        let n = find_roots(&coef, &mut roots, DEFAULT_ERROR).unwrap();
+        let n = find_roots::<F64Adaptor>(&coef, &mut roots, DEFAULT_ERROR).unwrap();
         assert_eq!(n, 0);
         // degree 6, bounded: roots at ±1, ±2, ±3 filtered to [-1.5, 1.5]
         let known = [-3.0, -2.0, -1.0, 1.0, 2.0, 3.0];
         let mut coef = [0.0; 7];
         poly_from_roots(&known, &mut coef);
         let mut roots = [0.0; 6];
-        let n = find_roots_in_range(&coef, &mut roots, -1.5, 1.5, DEFAULT_ERROR).unwrap();
+        let n =
+            find_roots_in_range::<F64Adaptor>(&coef, &mut roots, -1.5, 1.5, DEFAULT_ERROR).unwrap();
         assert_eq!(n, 2);
         verify_expected_roots(&[-1.0, 1.0], &roots, n);
     }
@@ -985,13 +1084,15 @@ mod test {
     fn t_edge_cases() {
         // degree reduction: nominal degree 5 with zero leading coeffs -> x^2 - 4
         let mut roots5 = [0.0; 5];
-        let n = find_roots(&[-4.0, 0.0, 1.0, 0.0, 0.0, 0.0], &mut roots5, DEFAULT_ERROR).unwrap();
+        let n =
+            find_roots::<F64Adaptor>(&[-4.0, 0.0, 1.0, 0.0, 0.0, 0.0], &mut roots5, DEFAULT_ERROR)
+                .unwrap();
         assert_eq!(n, 2);
         verify_expected_roots(&[-2.0, 2.0], &roots5, n);
         // root at zero: x(x-1)(x-2) = x^3 - 3x^2 + 2x
         let mut roots3 = [0.0; 3];
         let coef = [0.0, 2.0, -3.0, 1.0];
-        let n = find_roots(&coef, &mut roots3, DEFAULT_ERROR).unwrap();
+        let n = find_roots::<F64Adaptor>(&coef, &mut roots3, DEFAULT_ERROR).unwrap();
         assert_eq!(n, 3);
         verify_roots(&coef, &roots3, n);
         verify_expected_roots(&[0.0, 1.0, 2.0], &roots3, n);
@@ -999,7 +1100,7 @@ mod test {
         let mut roots2 = [0.0; 2];
         for &a in &[0.001, 1.0, 100.0, 10000.0] {
             let coef = [-(a * a), 0.0, 1.0];
-            let n = find_roots(&coef, &mut roots2, DEFAULT_ERROR).unwrap();
+            let n = find_roots::<F64Adaptor>(&coef, &mut roots2, DEFAULT_ERROR).unwrap();
             assert_eq!(n, 2, "failed for a={}", a);
             assert!(
                 (roots2[0] - (-a)).abs() < TOL * (1.0 + a),
@@ -1015,19 +1116,27 @@ mod test {
         // large & tiny coefficient scales: s * (x-1)(x-2) for s = 1e12 and 1e-12
         for &s in &[1e12, 1e-12] {
             let coef = [2.0 * s, -3.0 * s, 1.0 * s];
-            let n = find_roots(&coef, &mut roots2, DEFAULT_ERROR).unwrap();
+            let n = find_roots::<F64Adaptor>(&coef, &mut roots2, DEFAULT_ERROR).unwrap();
             assert_eq!(n, 2, "failed for scale={}", s);
             assert!((roots2[0] - 1.0).abs() < TOL, "failed for scale={}", s);
             assert!((roots2[1] - 2.0).abs() < TOL, "failed for scale={}", s);
         }
         // bounded: root exactly at boundary
         let mut roots1 = [0.0; 1];
-        let n = find_roots_in_range(&[-5.0, 1.0], &mut roots1, 5.0, 10.0, DEFAULT_ERROR).unwrap();
+        let n =
+            find_roots_in_range::<F64Adaptor>(&[-5.0, 1.0], &mut roots1, 5.0, 10.0, DEFAULT_ERROR)
+                .unwrap();
         assert_eq!(n, 1);
         assert!((roots1[0] - 5.0).abs() < TOL);
         // bounded: (x-5)(x-10), range [6,9] -> no roots
-        let n =
-            find_roots_in_range(&[50.0, -15.0, 1.0], &mut roots2, 6.0, 9.0, DEFAULT_ERROR).unwrap();
+        let n = find_roots_in_range::<F64Adaptor>(
+            &[50.0, -15.0, 1.0],
+            &mut roots2,
+            6.0,
+            9.0,
+            DEFAULT_ERROR,
+        )
+        .unwrap();
         assert_eq!(n, 0);
     }
 
@@ -1043,7 +1152,8 @@ mod test {
     fn t_accuracy() {
         // irrational cubic: x^3 - 2 = 0 -> x = 2^(1/3)
         let mut roots3 = [0.0; 3];
-        let n = find_roots(&[-2.0, 0.0, 0.0, 1.0], &mut roots3, DEFAULT_ERROR).unwrap();
+        let n =
+            find_roots::<F64Adaptor>(&[-2.0, 0.0, 0.0, 1.0], &mut roots3, DEFAULT_ERROR).unwrap();
         assert_eq!(n, 1);
         let expected = 2.0_f64.cbrt();
         assert!(
@@ -1057,7 +1167,7 @@ mod test {
         let mut coef = [0.0; 5];
         poly_from_roots(&known, &mut coef);
         let mut roots4 = [0.0; 4];
-        let n = find_roots(&coef, &mut roots4, DEFAULT_ERROR).unwrap();
+        let n = find_roots::<F64Adaptor>(&coef, &mut roots4, DEFAULT_ERROR).unwrap();
         assert_eq!(n, 4);
         for i in 0..4 {
             assert!(
@@ -1088,7 +1198,8 @@ mod test {
             let x1 = 5.0;
             let expected_count = known.iter().filter(|&&r| r >= x0 && r <= x1).count();
             let mut roots = [0.0; 3];
-            let n = find_roots_in_range(&coef, &mut roots, x0, x1, DEFAULT_ERROR).unwrap();
+            let n = find_roots_in_range::<F64Adaptor>(&coef, &mut roots, x0, x1, DEFAULT_ERROR)
+                .unwrap();
             assert_eq!(
                 n as usize, expected_count,
                 "known roots {:?}, range [{}, {}], expected {} got {}",

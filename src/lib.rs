@@ -1,12 +1,14 @@
-pub mod arc;
-pub mod error;
-pub mod line;
-pub mod spline;
-pub mod vec;
+mod adaptor;
+mod arc;
+mod error;
+mod spline;
+mod vec;
 
 #[doc(hidden)]
 pub mod polynomial;
 
-pub use arc::Arc;
-pub use spline::Spline;
-pub use vec::Vec3;
+pub use adaptor::{Adaptor, CrossProductAdaptor, ScalarAdaptor, TrigonometryAdaptor};
+pub use arc::{Arc, Arc2d, Arc2f, Arc3d, Arc3f};
+pub use error::Error;
+pub use spline::{Spline, Spline2d, Spline2f, Spline3d, Spline3f};
+pub use vec::{DVec, DVec2, DVec3, F32Adaptor, F64Adaptor, Vec, Vec2, Vec3};

@@ -1,8 +1,143 @@
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3, Vec4Swizzles};
-use loke::arc::Arc;
-use loke::spline::Spline;
+use loke::{self, Adaptor, CrossProductAdaptor, ScalarAdaptor, TrigonometryAdaptor};
 use std::{marker::PhantomData, ops::Range};
+
+// ---------- Glam adaptor ----------
+
+#[derive(Clone)]
+struct GlamAdaptor;
+
+impl ScalarAdaptor for GlamAdaptor {
+    type Float = f32;
+    #[inline(always)]
+    fn abs(x: f32) -> f32 {
+        x.abs()
+    }
+    #[inline(always)]
+    fn sqrt(x: f32) -> f32 {
+        x.sqrt()
+    }
+    #[inline(always)]
+    fn is_finite(x: f32) -> bool {
+        x.is_finite()
+    }
+    #[inline(always)]
+    fn mul_add(x: f32, a: f32, b: f32) -> f32 {
+        x.mul_add(a, b)
+    }
+    #[inline(always)]
+    fn scalar(val: f64) -> f32 {
+        val as f32
+    }
+    #[inline(always)]
+    fn epsilon() -> f32 {
+        f32::EPSILON
+    }
+    #[inline(always)]
+    fn min(x: f32, other: f32) -> f32 {
+        x.min(other)
+    }
+    #[inline(always)]
+    fn max(x: f32, other: f32) -> f32 {
+        x.max(other)
+    }
+    #[inline(always)]
+    fn clamp(x: f32, lo: f32, hi: f32) -> f32 {
+        x.clamp(lo, hi)
+    }
+
+    #[inline(always)]
+    fn ceil(x: Self::Float) -> Self::Float {
+        x.ceil()
+    }
+
+    #[inline(always)]
+    fn to_usize(x: Self::Float) -> usize {
+        x as usize
+    }
+}
+
+impl TrigonometryAdaptor for GlamAdaptor {
+    #[inline(always)]
+    fn acos(x: Self::Float) -> Self::Float {
+        x.acos()
+    }
+
+    #[inline(always)]
+    fn sin_cos(x: Self::Float) -> (Self::Float, Self::Float) {
+        x.sin_cos()
+    }
+
+    #[inline(always)]
+    fn sin(x: Self::Float) -> Self::Float {
+        x.sin()
+    }
+
+    #[inline(always)]
+    fn cos(x: Self::Float) -> Self::Float {
+        x.cos()
+    }
+
+    #[inline(always)]
+    fn tan(x: Self::Float) -> Self::Float {
+        x.tan()
+    }
+}
+
+impl CrossProductAdaptor<3> for GlamAdaptor {
+    #[inline(always)]
+    fn cross(a: &Self::Vector, b: &Self::Vector) -> Self::Vector {
+        a.cross(*b)
+    }
+}
+
+impl Adaptor<3> for GlamAdaptor {
+    type Vector = Vec3;
+    type Scalar = f32;
+
+    #[inline(always)]
+    fn zero_vector() -> Vec3 {
+        Vec3::ZERO
+    }
+    #[inline(always)]
+    fn vector(coords: [f32; 3]) -> Vec3 {
+        Vec3::new(coords[0], coords[1], coords[2])
+    }
+    #[inline(always)]
+    fn vector_coord(v: &Vec3, i: usize) -> f32 {
+        v[i]
+    }
+
+    #[inline(always)]
+    fn vector_length(v: &Vec3) -> f32 {
+        v.length()
+    }
+
+    #[inline(always)]
+    fn vector_length_sq(v: &Self::Vector) -> Self::Scalar {
+        v.length_squared()
+    }
+
+    #[inline(always)]
+    fn normalize(v: Self::Vector) -> Self::Vector {
+        v.normalize()
+    }
+
+    #[inline(always)]
+    fn dot_product(a: &Self::Vector, b: &Self::Vector) -> Self::Scalar {
+        a.dot(*b)
+    }
+
+    #[inline(always)]
+    fn coord_arr(v: &Self::Vector) -> [Self::Scalar; 3] {
+        [v.x, v.y, v.z]
+    }
+}
+
+type Spline = loke::Spline<3, GlamAdaptor>;
+type Arc = loke::Arc<3, GlamAdaptor>;
+
 use wgpu::util::DeviceExt;
 use winit::{
     application::ApplicationHandler,
@@ -105,12 +240,12 @@ const INPUT_POINT_COLOR: [f32; 4] = [0.8, 0.8, 0.75, 1.0];
 // ---------- Scene trait ----------
 
 trait Scene {
-    fn init() -> Box<[loke::Vec3]>;
+    fn init() -> Box<[Vec3]>;
     fn update(
-        inputs: &[loke::Vec3],
+        inputs: &[Vec3],
         splines: &mut Vec<Spline>,
         arcs: &mut Vec<Arc>,
-        points: &mut Vec<loke::Vec3>,
+        points: &mut Vec<Vec3>,
     );
 }
 
@@ -230,10 +365,10 @@ struct App<S: Scene> {
     gpu: Option<Gpu>,
     window: Option<Window>,
     // Scene I/O
-    inputs: Box<[loke::Vec3]>,
+    inputs: Box<[Vec3]>,
     out_splines: Vec<Spline>,
     out_arcs: Vec<Arc>,
-    out_points: Vec<loke::Vec3>,
+    out_points: Vec<Vec3>,
     // Render data built from scene outputs
     vertices: Vec<Vertex>,
     points: Vec<PointInstance>,
@@ -266,7 +401,7 @@ impl<S: Scene> App<S> {
             .enumerate()
             .map(|(i, p)| DraggablePoint {
                 id: i,
-                position: to_glam(*p),
+                position: *p,
             })
             .collect();
 
@@ -320,7 +455,7 @@ impl<S: Scene> App<S> {
             // Solid curve (arc_len=0 → never dashed)
             self.vertices
                 .extend(spline.adaptive_samples(0.001).map(|p| Vertex {
-                    pos: to_glam(p).into(),
+                    pos: p.into(),
                     color: SPLINE_COLOR,
                     arc_len: 0.0,
                 }));
@@ -329,11 +464,11 @@ impl<S: Scene> App<S> {
             let mut arc = 0.0_f32;
             for i in (0..n).rev() {
                 if i < n - 1 {
-                    let d = to_glam(cps[i]) - to_glam(cps[i + 1]);
+                    let d = cps[i] - cps[i + 1];
                     arc += d.length();
                 }
                 self.vertices.push(Vertex {
-                    pos: to_glam(cps[i]).into(),
+                    pos: cps[i].into(),
                     color: CTRL_CAGE_COLOR,
                     arc_len: arc,
                 });
@@ -348,7 +483,7 @@ impl<S: Scene> App<S> {
             let start = self.vertices.len() as u32;
             self.vertices
                 .extend(arc.adaptive_samples(0.001).map(|p| Vertex {
-                    pos: to_glam(p).into(),
+                    pos: p.into(),
                     color: SPLINE_COLOR,
                     arc_len: 0.0,
                 }));
@@ -361,7 +496,7 @@ impl<S: Scene> App<S> {
         // Input points (gizmo centers)
         for p in self.inputs.iter() {
             self.points.push(PointInstance {
-                center: to_glam(*p).into(),
+                center: (*p).into(),
                 color: INPUT_POINT_COLOR,
             });
         }
@@ -369,7 +504,7 @@ impl<S: Scene> App<S> {
         // Scene output points
         for p in &self.out_points {
             self.points.push(PointInstance {
-                center: to_glam(*p).into(),
+                center: (*p).into(),
                 color: POINT_COLOR,
             });
         }
@@ -474,7 +609,7 @@ impl<S: Scene> App<S> {
 
         let id = self.draggable[pi].id;
         self.draggable[pi].position = new_pos;
-        self.inputs[id] = to_loke(new_pos);
+        self.inputs[id] = new_pos;
         S::update(
             &self.inputs,
             &mut self.out_splines,
@@ -525,35 +660,35 @@ impl<S: Scene> App<S> {
 }
 
 fn rebuild_bbox(
-    min: loke::Vec3,
-    max: loke::Vec3,
+    min: Vec3,
+    max: Vec3,
     vertices: &mut Vec<Vertex>,
     line_strips: &mut Vec<Range<u32>>,
 ) {
     let start = vertices.len() as u32;
     vertices.extend(
         [
-            loke::Vec3(min.0, min.1, min.2),
-            loke::Vec3(max.0, min.1, min.2),
-            loke::Vec3(max.0, max.1, min.2),
-            loke::Vec3(max.0, max.1, max.2),
-            loke::Vec3(min.0, max.1, max.2),
-            loke::Vec3(min.0, min.1, max.2),
-            loke::Vec3(max.0, min.1, max.2),
-            loke::Vec3(max.0, max.1, max.2),
-            loke::Vec3(max.0, max.1, min.2),
-            loke::Vec3(min.0, max.1, min.2),
-            loke::Vec3(min.0, min.1, min.2),
-            loke::Vec3(min.0, min.1, max.2),
-            loke::Vec3(min.0, max.1, max.2),
-            loke::Vec3(min.0, max.1, min.2),
-            loke::Vec3(max.0, max.1, min.2),
-            loke::Vec3(max.0, min.1, min.2),
-            loke::Vec3(max.0, min.1, max.2),
+            Vec3::new(min.x, min.y, min.z),
+            Vec3::new(max.x, min.y, min.z),
+            Vec3::new(max.x, max.y, min.z),
+            Vec3::new(max.x, max.y, max.z),
+            Vec3::new(min.x, max.y, max.z),
+            Vec3::new(min.x, min.y, max.z),
+            Vec3::new(max.x, min.y, max.z),
+            Vec3::new(max.x, max.y, max.z),
+            Vec3::new(max.x, max.y, min.z),
+            Vec3::new(min.x, max.y, min.z),
+            Vec3::new(min.x, min.y, min.z),
+            Vec3::new(min.x, min.y, max.z),
+            Vec3::new(min.x, max.y, max.z),
+            Vec3::new(min.x, max.y, min.z),
+            Vec3::new(max.x, max.y, min.z),
+            Vec3::new(max.x, min.y, min.z),
+            Vec3::new(max.x, min.y, max.z),
         ]
         .iter()
         .map(|p| Vertex {
-            pos: to_glam(*p).into(),
+            pos: (*p).into(),
             color: BBOX_COLOR,
             arc_len: 0.0,
         }),
@@ -562,14 +697,6 @@ fn rebuild_bbox(
 }
 
 // ---------- Helpers ----------
-
-fn to_glam(v: loke::Vec3) -> Vec3 {
-    Vec3::new(v.0 as f32, v.1 as f32, v.2 as f32)
-}
-
-fn to_loke(v: Vec3) -> loke::Vec3 {
-    loke::Vec3(v.x as f64, v.y as f64, v.z as f64)
-}
 
 fn bounding_box(verts: &[Vertex], points: &[PointInstance]) -> (Vec3, Vec3) {
     let mut lo = Vec3::splat(f32::MAX);
@@ -1105,37 +1232,37 @@ impl<S: Scene> ApplicationHandler for App<S> {
 struct CurveScene;
 
 impl Scene for CurveScene {
-    fn init() -> Box<[loke::Vec3]> {
+    fn init() -> Box<[Vec3]> {
         Box::new([
             // Spline points.
-            loke::Vec3(-2.0, 0.0, 0.0),
-            loke::Vec3(-0.5, 2.0, 1.0),
-            loke::Vec3(0.5, -2.0, 1.0),
-            loke::Vec3(2.0, 2.0, 0.0),
-            loke::Vec3(3.5, 0.0, 0.0),
-            //Arc points.
-            loke::Vec3(-3.5, 0.0, 0.0), // start
-            loke::Vec3(-3.0, 1.5, 0.0), // middle
-            loke::Vec3(-2.5, 0.0, 0.0), // end
+            Vec3::new(-2.0, 0.0, 0.0),
+            Vec3::new(-0.5, 2.0, 1.0),
+            Vec3::new(0.5, -2.0, 1.0),
+            Vec3::new(2.0, 2.0, 0.0),
+            Vec3::new(3.5, 0.0, 0.0),
+            // Arc points.
+            Vec3::new(-3.5, 0.0, 0.0), // start
+            Vec3::new(-3.0, 1.5, 0.0), // middle
+            Vec3::new(-2.5, 0.0, 0.0), // end
         ])
     }
 
     fn update(
-        inputs: &[loke::Vec3],
+        inputs: &[Vec3],
         splines: &mut Vec<Spline>,
         arcs: &mut Vec<Arc>,
-        points: &mut Vec<loke::Vec3>,
+        points: &mut Vec<Vec3>,
     ) {
         // Splines.
         splines.clear();
-        let curve = Spline::create_clamped(&inputs[0..5], 3).unwrap();
+        let curve = Spline::create_clamped(inputs[0..5].to_vec(), 3).unwrap();
         points.clear();
         points.push({
             let (a, b) = curve.domain();
             curve.point((a + b) * 0.5).unwrap()
         });
         splines.push(curve);
-        //Arcs.
+        // Arcs.
         arcs.clear();
         if let Ok(arc) = Arc::from_three_points(inputs[5], inputs[6], inputs[7]) {
             arcs.push(arc);

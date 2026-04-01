@@ -1,34 +1,6 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use loke::{
-    Arc, Spline, Vec3,
-    polynomial::{DEFAULT_ERROR, find_roots},
-};
-
-// ---------------------------------------------------------------------------
-// Deterministic PRNG — identical implementation in bench.cpp
-// ---------------------------------------------------------------------------
-
-struct Xorshift64 {
-    state: u64,
-}
-
-impl Xorshift64 {
-    fn new(seed: u64) -> Self {
-        Self { state: seed }
-    }
-
-    fn next(&mut self) -> u64 {
-        self.state ^= self.state << 13;
-        self.state ^= self.state >> 7;
-        self.state ^= self.state << 17;
-        self.state
-    }
-
-    fn uniform(&mut self, lo: f64, hi: f64) -> f64 {
-        let f = (self.next() >> 11) as f64 * (1.0 / (1u64 << 53) as f64);
-        lo + f * (hi - lo)
-    }
-}
+use loke::{Arc3d, DVec, F64Adaptor, Spline3d, polynomial::find_roots};
+use rand::{RngExt, SeedableRng, rngs::SmallRng};
 
 // ---------------------------------------------------------------------------
 // Expand monic polynomial from its roots (ascending coefficient order)
@@ -62,35 +34,33 @@ const SEED: u64 = 0xDEADBEEF12345678;
 
 fn generate_polys<const MDP1: usize>() -> Vec<[f64; MDP1]> {
     let degree = MDP1 - 1;
-    let mut rng = Xorshift64::new(SEED + degree as u64);
+    let mut rng = SmallRng::seed_from_u64(SEED + degree as u64);
     let mut polys = Vec::with_capacity(NUM_POLYS);
-
     for i in 0..NUM_POLYS {
         let mut coef = [0.0f64; MDP1];
-
         if i < 500 {
-            let roots: Vec<f64> = (0..degree).map(|_| rng.uniform(-10.0, 10.0)).collect();
+            let roots: Vec<f64> = (0..degree).map(|_| rng.random_range(-10.0..10.0)).collect();
             expand_from_roots(&roots, &mut coef);
         } else if i < 750 {
-            let center = rng.uniform(-2.0, 2.0);
+            let center: f64 = rng.random_range(-2.0..2.0);
             let roots: Vec<f64> = (0..degree)
-                .map(|_| center + rng.uniform(-0.5, 0.5))
+                .map(|_| center + rng.random_range(-0.5..0.5))
                 .collect();
             expand_from_roots(&roots, &mut coef);
         } else {
             for j in 0..MDP1 {
-                coef[j] = rng.uniform(-5.0, 5.0);
+                coef[j] = rng.random_range(-5.0..5.0);
             }
             if coef[degree].abs() < 0.1 {
                 coef[degree] = if coef[degree] >= 0.0 { 1.0 } else { -1.0 };
             }
         }
-
         polys.push(coef);
     }
-
     polys
 }
+
+pub const DEFAULT_ERROR: f64 = 6e-7;
 
 fn b_root_finding<const MDP1: usize>(c: &mut Criterion, label: &str) {
     let polys = generate_polys::<MDP1>();
@@ -98,8 +68,8 @@ fn b_root_finding<const MDP1: usize>(c: &mut Criterion, label: &str) {
         let mut i = 0usize;
         let mut roots = [0.0f64; MDP1];
         b.iter(|| {
-            let n =
-                find_roots(black_box(&polys[i]), &mut roots, DEFAULT_ERROR).expect("Cannot fail");
+            let n = find_roots::<F64Adaptor>(black_box(&polys[i]), &mut roots, DEFAULT_ERROR)
+                .expect("Cannot fail");
             black_box(n);
             i += 1;
             if i >= NUM_POLYS {
@@ -109,18 +79,22 @@ fn b_root_finding<const MDP1: usize>(c: &mut Criterion, label: &str) {
     });
 }
 
-fn b_spline_adaptive_samples(c: &mut Criterion) {
-    let spline = Spline::create_clamped(
-        &[
-            Vec3(-2.0, 0.0, 0.0),
-            Vec3(-0.5, 2.0, 1.0),
-            Vec3(0.5, -2.0, 1.0),
-            Vec3(2.0, 2.0, 0.0),
-            Vec3(3.5, 0.0, 0.0),
+fn make_spline() -> Spline3d {
+    Spline3d::create_clamped(
+        vec![
+            DVec([-2.0, 0.0, 0.0]),
+            DVec([-0.5, 2.0, 1.0]),
+            DVec([0.5, -2.0, 1.0]),
+            DVec([2.0, 2.0, 0.0]),
+            DVec([3.5, 0.0, 0.0]),
         ],
         3,
     )
-    .unwrap();
+    .unwrap()
+}
+
+fn b_spline_adaptive_samples(c: &mut Criterion) {
+    let spline = make_spline();
     let mut buf = Vec::new();
     c.bench_function("degree_03_spline_adaptive_samples", |b| {
         buf.clear();
@@ -131,17 +105,7 @@ fn b_spline_adaptive_samples(c: &mut Criterion) {
 }
 
 fn b_spline_length(c: &mut Criterion) {
-    let spline = Spline::create_clamped(
-        &[
-            Vec3(-2.0, 0.0, 0.0),
-            Vec3(-0.5, 2.0, 1.0),
-            Vec3(0.5, -2.0, 1.0),
-            Vec3(2.0, 2.0, 0.0),
-            Vec3(3.5, 0.0, 0.0),
-        ],
-        3,
-    )
-    .unwrap();
+    let spline = make_spline();
     c.bench_function("degree_03_spline_length", |b| {
         let mut lsum = 0.0_f64;
         b.iter(|| {
@@ -150,18 +114,18 @@ fn b_spline_length(c: &mut Criterion) {
     });
 }
 
+fn b_spline_bounds(c: &mut Criterion) {
+    let spline = make_spline();
+    c.bench_function("degree_03_spline_bounds", |b| {
+        let mut bounds = (DVec([0.0; 3]), DVec([0.0; 3]));
+        b.iter(|| {
+            bounds = black_box(spline.bounds());
+        });
+    });
+}
+
 fn b_spline_eval(c: &mut Criterion) {
-    let spline = Spline::create_clamped(
-        &[
-            Vec3(-2.0, 0.0, 0.0),
-            Vec3(-0.5, 2.0, 1.0),
-            Vec3(0.5, -2.0, 1.0),
-            Vec3(2.0, 2.0, 0.0),
-            Vec3(3.5, 0.0, 0.0),
-        ],
-        3,
-    )
-    .unwrap();
+    let spline = make_spline();
     const N_SAMPLES: usize = 1000;
     let (dom_start, dom_end) = spline.domain();
     let params: Vec<f64> = (0..=N_SAMPLES)
@@ -171,7 +135,7 @@ fn b_spline_eval(c: &mut Criterion) {
         })
         .collect();
     c.bench_function("degree_03_spline_eval_point", move |b| {
-        let mut psum = Vec3(0.0, 0.0, 0.0);
+        let mut psum = DVec([0.0; 3]);
         b.iter(|| {
             for t in params.iter() {
                 psum += black_box(spline.point(*t).unwrap());
@@ -181,17 +145,7 @@ fn b_spline_eval(c: &mut Criterion) {
 }
 
 fn b_spline_eval_with_deriv(c: &mut Criterion) {
-    let spline = Spline::create_clamped(
-        &[
-            Vec3(-2.0, 0.0, 0.0),
-            Vec3(-0.5, 2.0, 1.0),
-            Vec3(0.5, -2.0, 1.0),
-            Vec3(2.0, 2.0, 0.0),
-            Vec3(3.5, 0.0, 0.0),
-        ],
-        3,
-    )
-    .unwrap();
+    let spline = make_spline();
     const N_SAMPLES: usize = 1000;
     let (dom_start, dom_end) = spline.domain();
     let params: Vec<f64> = (0..=N_SAMPLES)
@@ -201,7 +155,7 @@ fn b_spline_eval_with_deriv(c: &mut Criterion) {
         })
         .collect();
     c.bench_function("degree_03_spline_eval_point_with_deriv", move |b| {
-        let mut results = [Vec3(0.0, 0.0, 0.0); 3];
+        let mut results = [DVec([0.0; 3]); 3];
         b.iter(|| {
             for t in params.iter() {
                 black_box(
@@ -215,10 +169,10 @@ fn b_spline_eval_with_deriv(c: &mut Criterion) {
 }
 
 fn b_arc_adaptive_samples(c: &mut Criterion) {
-    let arc = Arc::from_three_points(
-        Vec3(-3.5, 0.0, 0.0), // start
-        Vec3(-3.0, 1.5, 0.0), // middle
-        Vec3(-2.5, 0.0, 0.0), // end
+    let arc = Arc3d::from_three_points(
+        DVec([-3.5, 0.0, 0.0]), // start
+        DVec([-3.0, 1.5, 0.0]), // middle
+        DVec([-2.5, 0.0, 0.0]), // end
     )
     .unwrap();
     let mut buf = Vec::new();
@@ -242,6 +196,7 @@ fn benchmarks(c: &mut Criterion) {
     b_spline_adaptive_samples(c);
     b_arc_adaptive_samples(c);
     b_spline_length(c);
+    b_spline_bounds(c);
     b_spline_eval(c);
     b_spline_eval_with_deriv(c);
 }
