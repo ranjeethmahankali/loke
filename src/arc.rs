@@ -8,8 +8,6 @@ use std::f64::{
     consts::{PI, TAU},
 };
 
-const ANG_EPS: f64 = 1e-10;
-
 pub type Arc2d = Arc<2, F64Adaptor>;
 pub type Arc3d = Arc<3, F64Adaptor>;
 pub type Arc2f = Arc<2, F32Adaptor>;
@@ -80,14 +78,14 @@ where
             A::scalar(1.0),
         );
         let angle = A::acos(dot);
-        if angle <= A::scalar(ANG_EPS) || angle >= A::scalar(PI - ANG_EPS) {
+        if angle <= A::epsilon() || angle >= (A::scalar(PI) - A::epsilon()) {
             return Err(Error::PointsCollinear);
         }
         let halfchord = A::vector_length(&chord) * A::scalar(0.5);
         let radius = halfchord / A::sin(angle);
         let sweep = A::scalar(2.0) * angle;
         check_radius_and_angle::<DIM, A>(radius, sweep)?;
-        let shift = if A::abs(angle - A::scalar(PI * 0.5)) < A::scalar(ANG_EPS) {
+        let shift = if A::abs(angle - A::scalar(PI * 0.5)) < A::epsilon() {
             A::scalar(0.0)
         } else {
             halfchord / A::tan(angle)
@@ -326,11 +324,11 @@ fn arc_bounds<const DIM: usize, A: Adaptor<DIM> + TrigonometryAdaptor>(
             })),
         )
     };
-    if angle < A::scalar(ANG_EPS) {
+    if angle < A::epsilon() {
         // Near degenerate arc.
         return (min, max);
     }
-    if A::abs(angle - A::scalar(PI)) < A::scalar(ANG_EPS) {
+    if A::abs(angle - A::scalar(PI)) < A::epsilon() {
         // Near semicircle.
         let half = angle * A::scalar(0.5);
         let new_mid = A::normalize(start_dir + mid_dir);
@@ -406,7 +404,7 @@ fn check_radius_and_angle<const DIM: usize, A: Adaptor<DIM>>(
     );
     if radius < A::epsilon() {
         Err(Error::RadiusTooSmall)
-    } else if angle >= A::scalar(TAU - ANG_EPS) {
+    } else if angle >= (A::scalar(TAU) - A::epsilon()) {
         Err(Error::ArcCannotBeCircle)
     } else {
         Ok(())
@@ -471,7 +469,7 @@ where
 
 #[inline(always)]
 fn slerp<A: TrigonometryAdaptor>(angle: A::Float, t: A::Float) -> [A::Float; 3] {
-    if angle < A::scalar(ANG_EPS) {
+    if angle < A::epsilon() {
         return [A::scalar(1.0) - t, A::scalar(0.0), t];
     }
     let half = angle * A::scalar(0.5);
@@ -500,7 +498,7 @@ fn slerp_raw_no_adjust<A: TrigonometryAdaptor>(angle: A::Float, t: A::Float) -> 
 ///    = θ/sin(θ) · [-cos((1-t)θ) · a + cos(tθ) · b]
 #[inline(always)]
 fn slerp_deriv<A: TrigonometryAdaptor>(angle: A::Float, t: A::Float) -> [A::Float; 3] {
-    if angle < A::scalar(ANG_EPS) {
+    if angle < A::epsilon() {
         return [A::scalar(-1.0), A::scalar(0.0), A::scalar(1.0)];
     }
     let half = angle / A::scalar(2.0);
@@ -527,7 +525,7 @@ fn slerp_deriv_unchecked<A: TrigonometryAdaptor>(angle: A::Float, t: A::Float) -
 /// Combined SLERP value and derivative, sharing branching and trig.
 #[inline(always)]
 fn slerp_with_deriv<A: TrigonometryAdaptor>(angle: A::Float, t: A::Float) -> [[A::Float; 3]; 2] {
-    if angle < A::scalar(ANG_EPS) {
+    if angle < A::epsilon() {
         return [
             [A::scalar(1.0) - t, A::scalar(0.0), t],
             [A::scalar(-1.0), A::scalar(0.0), A::scalar(1.0)],
