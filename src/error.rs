@@ -7,4 +7,6 @@ pub enum Error {
     RadiusTooSmall,
     PointsCollinear,
     ArcCannotBeCircle,
+    DegenerateValue,
+    InvalidArgument,
 }

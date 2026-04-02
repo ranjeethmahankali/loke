@@ -5,6 +5,7 @@ pub trait ScalarTraits:
     + Sized
     + Copy
     + Clone
+    + std::fmt::Debug
     + Add<Output = Self>
     + Sub<Output = Self>
     + Mul<Output = Self>
@@ -23,6 +24,7 @@ pub trait VectorTraits:
     'static
     + Sized
     + Copy
+    + std::fmt::Debug
     + Clone
     + PartialEq
     + Add<Output = Self>
@@ -30,39 +32,6 @@ pub trait VectorTraits:
     + AddAssign
     + SubAssign
     + Neg<Output = Self>
-{
-}
-
-impl<T> ScalarTraits for T where
-    T: 'static
-        + Sized
-        + Copy
-        + Clone
-        + Add<Output = Self>
-        + Sub<Output = Self>
-        + Mul<Output = Self>
-        + Div<Output = Self>
-        + Neg<Output = Self>
-        + AddAssign
-        + MulAssign
-        + SubAssign
-        + DivAssign
-        + PartialEq
-        + PartialOrd
-{
-}
-
-impl<T> VectorTraits for T where
-    T: 'static
-        + Sized
-        + Copy
-        + Clone
-        + PartialEq
-        + Add<Output = Self>
-        + Sub<Output = Self>
-        + AddAssign
-        + SubAssign
-        + Neg<Output = Self>
 {
 }
 
@@ -95,20 +64,55 @@ pub trait Adaptor<const DIM: usize>: Clone + ScalarAdaptor<Float = Self::Scalar>
     type Vector: VectorTraits
         // Arithmetic with scalars.
         + Mul<Self::Scalar, Output = Self::Vector>
-        + Div<Self::Scalar, Output = Self::Vector>;
+        + Div<Self::Scalar, Output = Self::Vector>
+        + DivAssign<Self::Scalar>
+        + MulAssign<Self::Scalar>;
     type Scalar: ScalarTraits + Mul<Self::Vector, Output = Self::Vector>;
 
     // Vector ops.
     fn zero_vector() -> Self::Vector;
     fn vector(coords: [Self::Scalar; DIM]) -> Self::Vector;
-    fn vector_coord(v: &Self::Vector, i: usize) -> Self::Scalar;
-    fn vector_length(v: &Self::Vector) -> Self::Scalar;
-    fn vector_length_sq(v: &Self::Vector) -> Self::Scalar;
+    fn vector_coord(v: Self::Vector, i: usize) -> Self::Scalar;
+    fn vector_length(v: Self::Vector) -> Self::Scalar;
+    fn vector_length_sq(v: Self::Vector) -> Self::Scalar;
     fn normalize(v: Self::Vector) -> Self::Vector;
-    fn dot_product(a: &Self::Vector, b: &Self::Vector) -> Self::Scalar;
-    fn coord_arr(v: &Self::Vector) -> [Self::Scalar; DIM];
+    fn dot_product(a: Self::Vector, b: Self::Vector) -> Self::Scalar;
+    fn coord_arr(v: Self::Vector) -> [Self::Scalar; DIM];
 }
 
-pub trait CrossProductAdaptor<const DIM: usize>: Adaptor<DIM> {
-    fn cross(a: &Self::Vector, b: &Self::Vector) -> Self::Vector;
+// Helper implementations for types:
+
+impl<T> ScalarTraits for T where
+    T: 'static
+        + Sized
+        + Copy
+        + Clone
+        + std::fmt::Debug
+        + Add<Output = Self>
+        + Sub<Output = Self>
+        + Mul<Output = Self>
+        + Div<Output = Self>
+        + Neg<Output = Self>
+        + AddAssign
+        + MulAssign
+        + SubAssign
+        + DivAssign
+        + PartialEq
+        + PartialOrd
+{
+}
+
+impl<T> VectorTraits for T where
+    T: 'static
+        + Sized
+        + Copy
+        + Clone
+        + std::fmt::Debug
+        + PartialEq
+        + Add<Output = Self>
+        + Sub<Output = Self>
+        + AddAssign
+        + SubAssign
+        + Neg<Output = Self>
+{
 }

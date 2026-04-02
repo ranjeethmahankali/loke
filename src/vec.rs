@@ -1,4 +1,4 @@
-use crate::{Adaptor, CrossProductAdaptor, ScalarAdaptor, TrigonometryAdaptor};
+use crate::{Adaptor, ScalarAdaptor, TrigonometryAdaptor};
 use std::ops::{
     Add, AddAssign, Div, DivAssign, Index, IndexMut, Mul, MulAssign, Neg, Sub, SubAssign,
 };
@@ -409,7 +409,7 @@ impl ScalarAdaptor for F64Adaptor {
 
     #[inline(always)]
     fn scalar(val: f64) -> Self::Float {
-        val as f64
+        val
     }
 
     #[inline(always)]
@@ -485,17 +485,17 @@ impl<const DIM: usize> Adaptor<DIM> for F64Adaptor {
     }
 
     #[inline(always)]
-    fn vector_coord(v: &Self::Vector, i: usize) -> Self::Scalar {
+    fn vector_coord(v: Self::Vector, i: usize) -> Self::Scalar {
         v[i]
     }
 
     #[inline(always)]
-    fn vector_length(v: &Self::Vector) -> Self::Scalar {
+    fn vector_length(v: Self::Vector) -> Self::Scalar {
         v.length()
     }
 
     #[inline(always)]
-    fn vector_length_sq(v: &Self::Vector) -> Self::Scalar {
+    fn vector_length_sq(v: Self::Vector) -> Self::Scalar {
         v.length_sq()
     }
 
@@ -505,24 +505,13 @@ impl<const DIM: usize> Adaptor<DIM> for F64Adaptor {
     }
 
     #[inline(always)]
-    fn dot_product(a: &Self::Vector, b: &Self::Vector) -> Self::Scalar {
-        a.dot(*b)
+    fn dot_product(a: Self::Vector, b: Self::Vector) -> Self::Scalar {
+        a.dot(b)
     }
 
     #[inline(always)]
-    fn coord_arr(v: &Self::Vector) -> [Self::Scalar; DIM] {
+    fn coord_arr(v: Self::Vector) -> [Self::Scalar; DIM] {
         v.0
-    }
-}
-
-impl CrossProductAdaptor<3> for F64Adaptor {
-    #[inline(always)]
-    fn cross(a: &Self::Vector, b: &Self::Vector) -> Self::Vector {
-        DVec([
-            a[1] * b[2] - a[2] * b[1],
-            a[2] * b[0] - a[0] * b[2],
-            a[0] * b[1] - a[1] * b[0],
-        ])
     }
 }
 
@@ -541,17 +530,17 @@ impl<const DIM: usize> Adaptor<DIM> for F32Adaptor {
     }
 
     #[inline(always)]
-    fn vector_coord(v: &Self::Vector, i: usize) -> Self::Scalar {
+    fn vector_coord(v: Self::Vector, i: usize) -> Self::Scalar {
         v[i]
     }
 
     #[inline(always)]
-    fn vector_length(v: &Self::Vector) -> Self::Scalar {
+    fn vector_length(v: Self::Vector) -> Self::Scalar {
         v.length()
     }
 
     #[inline(always)]
-    fn vector_length_sq(v: &Self::Vector) -> Self::Scalar {
+    fn vector_length_sq(v: Self::Vector) -> Self::Scalar {
         v.length_sq()
     }
 
@@ -561,23 +550,12 @@ impl<const DIM: usize> Adaptor<DIM> for F32Adaptor {
     }
 
     #[inline(always)]
-    fn dot_product(a: &Self::Vector, b: &Self::Vector) -> Self::Scalar {
-        a.dot(*b)
+    fn dot_product(a: Self::Vector, b: Self::Vector) -> Self::Scalar {
+        a.dot(b)
     }
 
     #[inline(always)]
-    fn coord_arr(v: &Self::Vector) -> [Self::Scalar; DIM] {
+    fn coord_arr(v: Self::Vector) -> [Self::Scalar; DIM] {
         v.0
-    }
-}
-
-impl CrossProductAdaptor<3> for F32Adaptor {
-    #[inline(always)]
-    fn cross(a: &Self::Vector, b: &Self::Vector) -> Self::Vector {
-        Vec([
-            a[1] * b[2] - a[2] * b[1],
-            a[2] * b[0] - a[0] * b[2],
-            a[0] * b[1] - a[1] * b[0],
-        ])
     }
 }

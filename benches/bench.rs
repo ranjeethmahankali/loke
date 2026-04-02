@@ -1,5 +1,5 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use loke::{Arc3d, DVec, F64Adaptor, Spline3d, polynomial::find_roots};
+use loke::{Arc3d, DVec, F64Adaptor, Spline3d, polynomial_roots};
 use rand::{RngExt, SeedableRng, rngs::SmallRng};
 
 // ---------------------------------------------------------------------------
@@ -10,9 +10,7 @@ fn expand_from_roots<const MDP1: usize>(roots: &[f64], coef: &mut [f64; MDP1]) {
     let degree = MDP1 - 1;
     coef.fill(0.0);
     coef[0] = 1.0;
-
-    for k in 0..degree {
-        let r = roots[k];
+    for (k, r) in roots.iter().enumerate().take(degree) {
         for i in (1..=k + 1).rev() {
             coef[i] = coef[i - 1] - r * coef[i];
         }
@@ -48,8 +46,8 @@ fn generate_polys<const MDP1: usize>() -> Vec<[f64; MDP1]> {
                 .collect();
             expand_from_roots(&roots, &mut coef);
         } else {
-            for j in 0..MDP1 {
-                coef[j] = rng.random_range(-5.0..5.0);
+            for dst in coef.iter_mut().take(MDP1) {
+                *dst = rng.random_range(-5.0..5.0);
             }
             if coef[degree].abs() < 0.1 {
                 coef[degree] = if coef[degree] >= 0.0 { 1.0 } else { -1.0 };
@@ -68,7 +66,7 @@ fn b_root_finding<const MDP1: usize>(c: &mut Criterion, label: &str) {
         let mut i = 0usize;
         let mut roots = [0.0f64; MDP1];
         b.iter(|| {
-            let n = find_roots::<F64Adaptor>(black_box(&polys[i]), &mut roots, DEFAULT_ERROR)
+            let n = polynomial_roots::<F64Adaptor>(black_box(&polys[i]), &mut roots, DEFAULT_ERROR)
                 .expect("Cannot fail");
             black_box(n);
             i += 1;
@@ -158,11 +156,9 @@ fn b_spline_eval_with_deriv(c: &mut Criterion) {
         let mut results = [DVec([0.0; 3]); 3];
         b.iter(|| {
             for t in params.iter() {
-                black_box(
-                    spline
-                        .point_with_derivs(*t, black_box(&mut results))
-                        .unwrap(),
-                );
+                spline
+                    .point_with_derivs(*t, black_box(&mut results))
+                    .unwrap();
             }
         });
     });

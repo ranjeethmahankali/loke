@@ -112,7 +112,7 @@ where
     }
 
     #[inline(always)]
-    pub fn valid_param(&self, u: A::Scalar) -> bool {
+    fn valid_param(&self, u: A::Scalar) -> bool {
         let (lo, hi) = self.domain();
         u >= lo && u <= hi
     }
@@ -156,7 +156,7 @@ where
                 degree + 1,
             ],
             |[basis, ndu, alt_coeff, left, right]| {
-                calc_ders_basis::<DIM, A>(
+                calc_ders_basis::<A>(
                     span,
                     u,
                     degree,
@@ -217,8 +217,8 @@ where
                     hi = A::max(hi, val);
                     if degree > 1 {
                         polynomial::differentiate::<A>(coeff, deriv);
-                        let n_roots = polynomial::find_roots_in_range::<A>(
-                            &deriv,
+                        let n_roots = polynomial::polynomial_roots_in_range::<A>(
+                            deriv,
                             roots,
                             A::scalar(0.0),
                             A::scalar(1.0),
@@ -252,7 +252,7 @@ where
         };
         samples
             .fold((first, A::scalar(0.0)), |(prev, total), s| {
-                let chord = A::vector_length(&(s.point - prev.point));
+                let chord = A::vector_length(s.point - prev.point);
                 // Sagitta (midpoint deviation) from the curvature at the previous sample:
                 // h ≈ |C''(t)| * Δt² / 8
                 let h: A::Scalar =
@@ -354,8 +354,8 @@ impl<'a, const DIM: usize, A: Adaptor<DIM>> SplineAdaptiveSamples<'a, DIM, A> {
                             deriv_buf,
                         );
                         curv_buf.fill(A::scalar(0.0));
-                        polynomial::differentiate::<A>(&deriv_buf, curv_buf);
-                        polynomial::mul_add::<A>(&curv_buf, &curv_buf, dst);
+                        polynomial::differentiate::<A>(deriv_buf, curv_buf);
+                        polynomial::mul_add::<A>(curv_buf, curv_buf, dst);
                     }
                 }
             },
@@ -412,7 +412,7 @@ impl<'a, const DIM: usize, A: Adaptor<DIM>> Iterator for SplineAdaptiveSamples<'
                     A::scalar(MIN_STEP),
                 )
             };
-            self.param = self.param + step; // Always increment no matter how small the step.
+            self.param += step; // Always increment no matter how small the step.
             (cmag2, step)
         } else {
             (A::scalar(0.0), A::scalar(0.0))
@@ -449,7 +449,7 @@ fn find_span<A: ScalarAdaptor>(knots: &[A::Float], degree: usize, u: A::Float) -
     let low = degree;
     let hi = n + 1;
     // The book manually implements the binary search, here we use the std function that does the same.
-    low + &knots[low..hi].partition_point(|k| k <= &u) - 1
+    low + knots[low..hi].partition_point(|k| k <= &u) - 1
 }
 
 /// Compute the power-basis polynomial coefficients from the piecewise Bézier
@@ -467,36 +467,40 @@ fn compute_polynomial_coeff<const DIM: usize, A: Adaptor<DIM>>(
     let msize = p + 1;
     let n_seg = bezier_cps.len() / msize;
     assert_eq!(bezier_cps.len() % msize, 0);
-    // Get the Bézier-to-power-basis conversion matrix.
-    let mut bezier_mat = vec![0.0; msize * msize];
-    get_bezier_matrix(p, &mut bezier_mat);
-    let bmat = View2D::create(&bezier_mat, msize, msize);
-    // For each segment, multiply bezierMat by the column of scalar Bézier CP
-    // values for each component. The C++ transposes the segment matrix to make
-    // columns be segments; we skip the transpose and just read from rows.
+    // Use the cached bezier matrix cache to compute the coefficients.
     let mut coeff = vec![A::scalar(0.0); DIM * n_seg * msize];
-    for ci in 0..DIM {
-        let comp_offset = ci * n_seg * msize;
-        for seg in 0..n_seg {
-            let cps = &bezier_cps[seg * msize..(seg + 1) * msize];
-            let out_base = comp_offset + seg * msize;
-            for i in 0..msize {
-                let mut val = A::scalar(0.0);
-                // bezierMat is lower triangular, so k only goes up to i.
-                for k in 0..=i {
-                    val += A::scalar(bmat[i][k]) * A::vector_coord(&cps[k], ci);
+    with_bezier_matrix(p, |bmat| {
+        // For each segment, multiply bezierMat by the column of scalar Bézier CP
+        // values for each component. The C++ transposes the segment matrix to make
+        // columns be segments; we skip the transpose and just read from rows.
+        for ci in 0..DIM {
+            let comp_offset = ci * n_seg * msize;
+            for seg in 0..n_seg {
+                let cps = &bezier_cps[seg * msize..(seg + 1) * msize];
+                let out_base = comp_offset + seg * msize;
+                for i in 0..msize {
+                    let mut val = A::scalar(0.0);
+                    // bezierMat is lower triangular, so k only goes up to i.
+                    for k in 0..=i {
+                        val += A::scalar(bmat[i][k]) * A::vector_coord(cps[k], ci);
+                    }
+                    coeff[out_base + i] = val;
                 }
-                coeff[out_base + i] = val;
             }
         }
-    }
+    });
     coeff
 }
 
-pub(crate) fn get_bezier_matrix(degree: usize, dst: &mut [f64]) {
+#[inline(always)]
+fn with_bezier_matrix<F, R>(degree: usize, callback: F) -> R
+where
+    F: FnOnce(View2D<'_, f64>) -> R,
+{
     thread_local! {
         static BEZIER_MATS: RefCell<Vec<Vec<f64>>> = RefCell::new(Default::default());
     }
+    // First ensure the matrix has been computed.
     BEZIER_MATS.with_borrow_mut(|cache| {
         if degree >= cache.len() {
             cache.resize(degree + 1, Vec::default());
@@ -515,8 +519,9 @@ pub(crate) fn get_bezier_matrix(degree: usize, dst: &mut [f64]) {
                 }
             }
         }
-        dst.copy_from_slice(mat); // Panics if the lengths don't match, so we don't need to check.
-    });
+        let msize = degree + 1;
+        callback(View2D::create(mat, msize, msize))
+    })
 }
 
 pub(crate) fn binomial_coeff(n: usize, k: usize) -> usize {
@@ -567,14 +572,12 @@ fn piecewise_bezier<const DIM: usize, A: Adaptor<DIM>>(
     let p = degree;
     let u_vec: &[A::Scalar] = knots;
     let p_vec: &[A::Vector] = control_points;
-    let mut q_mat = View2DMut::create(dst, n_segments, degree + 1);
+    let mut q_mat = View2DMut::create(dst, n_segments, p + 1);
     let m = n + p + 1;
     let mut a = p;
     let mut b = p + 1;
     let mut nb = 0;
-    for i in 0..=p {
-        q_mat[nb][i] = p_vec[i];
-    }
+    q_mat[nb].copy_from_slice(&p_vec[..p + 1]);
     while b < m {
         let i = b;
         while b < m && u_vec[b + 1] == u_vec[b] {
@@ -603,14 +606,14 @@ fn piecewise_bezier<const DIM: usize, A: Adaptor<DIM>>(
                 }
             }
         }
-        nb = nb + 1; // Bezier segment completed.
+        nb += 1; // Bezier segment completed.
         if b < m {
             // Initialize for next segment.
             for i in (p.saturating_sub(mult))..=p {
                 q_mat[nb][i] = p_vec[b - p + i];
             }
             a = b;
-            b = b + 1;
+            b += 1;
         }
     }
 }
@@ -749,13 +752,13 @@ fn calc_basis<A: ScalarAdaptor>(
 }
 
 /// This is algorithm A2.3 from the book.
-fn calc_ders_basis<const DIM: usize, A: Adaptor<DIM>>(
+fn calc_ders_basis<A: ScalarAdaptor>(
     span: usize,
-    u: A::Scalar,
+    u: A::Float,
     degree: usize,
     n_derivs: usize,
-    knots: &[A::Scalar],
-    [basis, ndu, alt_coeff, left, right]: [&mut [A::Scalar]; 5],
+    knots: &[A::Float],
+    [basis, ndu, alt_coeff, left, right]: [&mut [A::Float]; 5],
 ) {
     // Prep convenient views into buffers:
     let mut ders = View2DMut::create(basis, n_derivs + 1, degree + 1);
@@ -812,7 +815,7 @@ fn calc_ders_basis<const DIM: usize, A: Adaptor<DIM>>(
                 d += a[s2][j as usize] * ndu[(rk + j) as usize][pk as usize];
             }
             if r as isize <= pk {
-                a[s2][k] = -a[s1][k - 1] / ndu[(pk + 1) as usize][r as usize];
+                a[s2][k] = -a[s1][k - 1] / ndu[(pk + 1) as usize][r];
                 d += a[s2][k] * ndu[r][pk as usize];
             }
             ders[k][r] = d;
@@ -831,6 +834,8 @@ fn calc_ders_basis<const DIM: usize, A: Adaptor<DIM>>(
 
 #[cfg(test)]
 mod test {
+    use std::f64::consts::{E, FRAC_1_PI, LN_2, LOG2_E, PI, SQRT_2, TAU};
+
     use super::*;
     use crate::{DVec, DVec3, polynomial};
     use rand::{RngExt, SeedableRng, rngs::StdRng};
@@ -844,11 +849,11 @@ mod test {
     }
 
     fn make(cps: &[DVec3], knots: &[f64], degree: usize) -> S {
-        S::create(cps.to_vec(), knots.to_vec(), degree).unwrap()
+        S::create(cps, knots, degree).unwrap()
     }
 
     fn make_clamped(cps: &[DVec3], degree: usize) -> S {
-        S::create_clamped(cps.to_vec(), degree).unwrap()
+        S::create_clamped(cps, degree).unwrap()
     }
 
     // ======================================================================
@@ -922,13 +927,13 @@ mod test {
     #[test]
     fn t_create_validates_knot_count() {
         let cps = [vec3(0., 0., 0.), vec3(1., 0., 0.), vec3(2., 0., 0.)];
-        assert!(S::create(cps.to_vec(), vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0], 2).is_ok());
+        assert!(S::create(&cps, &[0.0, 0.0, 0.0, 1.0, 1.0, 1.0], 2).is_ok());
         assert!(matches!(
-            S::create(cps.to_vec(), vec![0.0, 0.0, 0.0, 1.0, 1.0], 2),
+            S::create(&cps, &[0.0, 0.0, 0.0, 1.0, 1.0], 2),
             Err(Error::IncorrectKnotCount)
         ));
         assert!(matches!(
-            S::create(cps.to_vec(), vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0], 2),
+            S::create(&cps, &[0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0], 2),
             Err(Error::IncorrectKnotCount)
         ));
     }
@@ -936,7 +941,7 @@ mod test {
     #[test]
     fn t_create_clamped_validates_control_points() {
         assert!(matches!(
-            S::create_clamped(vec![vec3(0., 0., 0.), vec3(1., 0., 0.)], 2),
+            S::create_clamped(&[vec3(0., 0., 0.), vec3(1., 0., 0.)], 2),
             Err(Error::InsufficientControlPoints)
         ));
         assert!(matches!(
@@ -2112,10 +2117,10 @@ mod test {
     #[test]
     fn t_clamped_endpoints_match_control_points() {
         let control_points = [
-            vec3(0.7123, 3.1416, -2.8081),
-            vec3(-1.4142, 0.5772, 6.2832),
-            vec3(2.7183, -0.6931, 1.4427),
-            vec3(-3.3691, 4.6692, -0.3183),
+            vec3(0.7123, PI, -2.8081),
+            vec3(-SQRT_2, 0.5772, TAU),
+            vec3(E, -LN_2, LOG2_E),
+            vec3(-3.3691, 4.6692, -FRAC_1_PI),
             vec3(0.1103, -2.5029, 5.7722),
             vec3(8.3144, 1.6180, -4.1888),
             vec3(-0.9033, 7.3891, 0.6137),

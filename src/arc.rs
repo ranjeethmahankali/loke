@@ -1,5 +1,5 @@
 use crate::{
-    Adaptor, CrossProductAdaptor, TrigonometryAdaptor,
+    Adaptor, ScalarAdaptor, TrigonometryAdaptor,
     error::Error,
     vec::{F32Adaptor, F64Adaptor},
 };
@@ -16,19 +16,19 @@ pub type Arc3f = Arc<3, F32Adaptor>;
 #[derive(Clone, Debug)]
 pub struct Arc<const DIM: usize, A>
 where
-    A: Adaptor<DIM> + TrigonometryAdaptor,
+    A: Adaptor<DIM>,
 {
     center: A::Vector,
     start_dir: A::Vector, // Unit vector from center toward start.
     mid_dir: A::Vector,   // Unit vector from center toward midpoint (used for antipodal SLERP).
     end_dir: A::Vector,   // Unit vector from center toward end.
     radius: A::Scalar,
-    angle: A::Scalar, // Signed sweep angle from start to end through mid. Positive = CCW around normal.
+    angle: A::Scalar, // Signed sweep angle from start to end through mid.
 }
 
 impl<const DIM: usize, A> Arc<DIM, A>
 where
-    A: Adaptor<DIM> + TrigonometryAdaptor,
+    A: Adaptor<DIM>,
 {
     /// Construct an arc from three points: start, a point along the arc, and end.
     pub fn from_three_points(
@@ -37,15 +37,25 @@ where
         end: A::Vector,
     ) -> Result<Self, Error>
     where
-        A: CrossProductAdaptor<DIM>,
+        A: TrigonometryAdaptor,
     {
-        let (center, radius, normal) =
+        let (center, radius) =
             circumcircle::<DIM, A>(start, middle, end).ok_or(Error::PointsCollinear)?;
-        let start_dir = A::normalize(start - center);
-        let end_dir = A::normalize(end - center);
-        let angle = oriented_angle::<DIM, A>(start_dir, end_dir, normal);
-        let mid_dir = rotate_around::<DIM, A>(start_dir, normal, angle * A::scalar(0.5));
-        check_radius_and_angle::<DIM, A>(radius, angle)?;
+        let start_dir = (start - center) / radius;
+        let end_dir = (end - center) / radius;
+        let mid_guess = (middle - center) / radius;
+        let mid_dir = calc_arc_middle::<DIM, A>(start_dir, mid_guess, end_dir)
+            .ok_or(Error::PointsCollinear)?;
+        let angle = A::acos(A::clamp(
+            A::dot_product(start_dir, mid_dir),
+            A::scalar(-1.0),
+            A::scalar(1.0),
+        )) + A::acos(A::clamp(
+            A::dot_product(mid_dir, end_dir),
+            A::scalar(-1.0),
+            A::scalar(1.0),
+        ));
+        check_radius_and_angle::<A>(radius, angle)?;
         Ok(Arc {
             center,
             radius,
@@ -63,17 +73,13 @@ where
         end: A::Vector,
     ) -> Result<Self, Error>
     where
-        A: CrossProductAdaptor<DIM>,
+        A: TrigonometryAdaptor,
     {
         let tangent = A::normalize(tangent);
         let chord = end - start;
-        let normal = A::normalize(A::cross(&tangent, &chord));
-        if A::vector_length_sq(&normal) < A::scalar(0.5) {
-            return Err(Error::PointsCollinear);
-        }
         let chord_dir = A::normalize(chord);
         let dot = A::clamp(
-            A::dot_product(&chord_dir, &tangent),
+            A::dot_product(chord_dir, tangent),
             A::scalar(-1.0),
             A::scalar(1.0),
         );
@@ -81,20 +87,29 @@ where
         if angle <= A::epsilon() || angle >= (A::scalar(PI) - A::epsilon()) {
             return Err(Error::PointsCollinear);
         }
-        let halfchord = A::vector_length(&chord) * A::scalar(0.5);
-        let radius = halfchord / A::sin(angle);
+        let sin_angle = A::sin(angle);
+        let halfchord = A::vector_length(chord) * A::scalar(0.5);
+        let radius = halfchord / sin_angle;
         let sweep = A::scalar(2.0) * angle;
-        check_radius_and_angle::<DIM, A>(radius, sweep)?;
+        check_radius_and_angle::<A>(radius, sweep)?;
+        // Component of tangent perpendicular to chord; |tangent| = 1 so |t_perp| = sin(angle).
+        let t_perp_dir = (tangent - chord_dir * dot) / sin_angle;
+        // Center lies on the perpendicular bisector of the chord. tan(angle) is positive
+        // for minor arcs (angle < π/2) and negative for major arcs (angle > π/2), which
+        // automatically places the center on the correct side in both cases.
         let shift = if A::abs(angle - A::scalar(PI * 0.5)) < A::epsilon() {
             A::scalar(0.0)
         } else {
             halfchord / A::tan(angle)
         };
-        let center =
-            (start + end) * A::scalar(0.5) + A::normalize(A::cross(&normal, &chord)) * shift;
+        let center = (start + end) * A::scalar(0.5) - t_perp_dir * shift;
         let start_dir = A::normalize(start - center);
         let end_dir = A::normalize(end - center);
-        let mid_dir = rotate_around::<DIM, A>(start_dir, normal, sweep * A::scalar(0.5));
+        // Rotate start_dir by half the sweep within the arc's plane. The tangent is the
+        // in-plane basis perpendicular to start_dir; project out any start_dir component
+        // caused by floating-point error in the user-supplied tangent.
+        let tangent_start = A::normalize(tangent - start_dir * A::dot_product(tangent, start_dir));
+        let mid_dir = start_dir * A::cos(angle) + tangent_start * sin_angle;
         Ok(Arc {
             center,
             radius,
@@ -102,43 +117,6 @@ where
             mid_dir,
             end_dir,
             angle: sweep,
-        })
-    }
-
-    /// Construct an arc from center, normal, start point on the circle, and sweep angle.
-    /// Angle is signed: positive = CCW around normal.
-    pub fn from_center_normal_start_angle(
-        center: A::Vector,
-        mut normal: A::Vector,
-        start: A::Vector,
-        mut angle: A::Scalar,
-    ) -> Result<Self, Error>
-    where
-        A: CrossProductAdaptor<DIM>,
-    {
-        if angle < A::scalar(0.0) {
-            normal = -normal;
-            angle = -angle;
-        }
-        let radius = A::vector_length(&(start - center));
-        check_radius_and_angle::<DIM, A>(radius, angle)?;
-        let normal = A::normalize(normal);
-        if A::vector_length_sq(&normal) < A::scalar(0.5) {
-            return Err(Error::InvalidParameter);
-        }
-        if A::abs(A::dot_product(&(start - center), &normal)) > A::epsilon() * radius {
-            return Err(Error::InvalidParameter);
-        }
-        let start_dir = A::normalize(start - center);
-        let end_dir = rotate_around::<DIM, A>(start_dir, normal, angle);
-        let mid_dir = rotate_around::<DIM, A>(start_dir, normal, angle * A::scalar(0.5));
-        Ok(Arc {
-            center,
-            radius,
-            start_dir,
-            mid_dir,
-            end_dir,
-            angle,
         })
     }
 
@@ -174,7 +152,10 @@ where
     }
 
     /// Evaluate a point on the arc at arc-length parameter `t` in `[0, length]`.
-    pub fn point(&self, t: A::Scalar) -> Option<A::Vector> {
+    pub fn point(&self, t: A::Scalar) -> Option<A::Vector>
+    where
+        A: TrigonometryAdaptor,
+    {
         let len = self.length();
         if t < A::scalar(0.0) || t > len {
             return None;
@@ -189,7 +170,10 @@ where
     }
 
     /// Evaluate the unit tangent at arc-length parameter `t` in `[0, length]`.
-    pub fn tangent(&self, t: A::Scalar) -> Option<A::Vector> {
+    pub fn tangent(&self, t: A::Scalar) -> Option<A::Vector>
+    where
+        A: TrigonometryAdaptor,
+    {
         let len = self.length();
         if t < A::scalar(0.0) || t > len || self.radius < A::epsilon() {
             return None;
@@ -202,7 +186,10 @@ where
         )
     }
 
-    pub fn point_with_derivs(&self, t: A::Scalar, results: &mut [A::Vector]) -> Result<(), Error> {
+    pub fn point_with_derivs(&self, t: A::Scalar, results: &mut [A::Vector]) -> Result<(), Error>
+    where
+        A: TrigonometryAdaptor,
+    {
         if results.is_empty() {
             return Ok(());
         }
@@ -240,7 +227,10 @@ where
     /// Uniformly sample the arc with the given tolerance (max chord deviation).
     /// For a circle, the chord error at step angle α is `r(1 - cos(α/2))`.
     /// Solving for α: `α = 2 * acos(1 - tolerance/r)`.
-    pub fn adaptive_samples(&self, tolerance: A::Scalar) -> impl Iterator<Item = A::Vector> {
+    pub fn adaptive_samples(&self, tolerance: A::Scalar) -> impl Iterator<Item = A::Vector>
+    where
+        A: TrigonometryAdaptor,
+    {
         let ang_step = if self.radius > A::epsilon() && tolerance > A::scalar(0.0) {
             A::scalar(2.0)
                 * A::acos(A::scalar(1.0) - A::min(tolerance / self.radius, A::scalar(1.0)))
@@ -280,7 +270,10 @@ where
     /// Compute the axis-aligned bounding box of the arc.
     ///
     /// Returns `(min_corner, max_corner)`.
-    pub fn bounds(&self) -> (A::Vector, A::Vector) {
+    pub fn bounds(&self) -> (A::Vector, A::Vector)
+    where
+        A: TrigonometryAdaptor,
+    {
         arc_bounds::<DIM, A>(
             self.center,
             self.radius,
@@ -304,6 +297,75 @@ where
     }
 }
 
+impl<A> Arc<3, A>
+where
+    A: Adaptor<3> + TrigonometryAdaptor,
+{
+    /// Construct an arc from center, normal, start point on the circle, and sweep angle.
+    /// Angle is signed: positive = CCW around normal.
+    pub fn from_axis_start_angle(
+        axis: (A::Vector, A::Vector),
+        start: A::Vector,
+        angle: A::Scalar,
+    ) -> Result<Self, Error> {
+        let (mut ax0, mut ax1) = axis;
+        let mut normal = ax1 - ax0;
+        let mut angle = angle;
+        if angle < A::scalar(0.0) {
+            normal = -normal;
+            angle = -angle;
+            std::mem::swap(&mut ax0, &mut ax1);
+        }
+        let norm_len = A::vector_length(normal);
+        if norm_len < A::epsilon() {
+            return Err(Error::DegenerateValue);
+        }
+        normal /= norm_len;
+        let vdiff = start - ax0;
+        let plane_dist = A::dot_product(vdiff, normal);
+        let vproject = plane_dist * normal;
+        let vrad = vdiff - vproject;
+        let center = start - vrad;
+        let radius = A::vector_length(vrad);
+        check_radius_and_angle::<A>(radius, angle)?;
+        let start_dir = A::normalize(start - center);
+        let end_dir = rotate_vec::<A>(start_dir, normal, angle);
+        let mid_dir = rotate_vec::<A>(start_dir, normal, angle * A::scalar(0.5));
+        Ok(Arc {
+            center,
+            radius,
+            start_dir,
+            mid_dir,
+            end_dir,
+            angle,
+        })
+    }
+
+    pub fn intrinsic_normal(&self) -> A::Vector {
+        let [ax, ay, az] = A::coord_arr(self.start_dir);
+        let [bx, by, bz] = A::coord_arr(self.mid_dir);
+        A::normalize(A::vector([
+            ay * bz - az * by,
+            az * bx - ax * bz,
+            ax * by - ay * bx,
+        ]))
+    }
+}
+
+/// Rodrigues' rotation formula for 3D: rotate `v` around unit `axis` by `angle`.
+#[inline(always)]
+fn rotate_vec<A: Adaptor<3> + TrigonometryAdaptor>(
+    v: A::Vector,
+    axis: A::Vector,
+    angle: A::Scalar,
+) -> A::Vector {
+    let (s, c) = A::sin_cos(angle);
+    let [ax, ay, az] = A::coord_arr(axis);
+    let [vx, vy, vz] = A::coord_arr(v);
+    let cross = A::vector([ay * vz - az * vy, az * vx - ax * vz, ax * vy - ay * vx]);
+    v * c + cross * s + axis * A::dot_product(axis, v) * (A::scalar(1.0) - c)
+}
+
 fn arc_bounds<const DIM: usize, A: Adaptor<DIM> + TrigonometryAdaptor>(
     center: A::Vector,
     radius: A::Scalar,
@@ -317,10 +379,10 @@ fn arc_bounds<const DIM: usize, A: Adaptor<DIM> + TrigonometryAdaptor>(
         let end = center + end_dir * radius;
         (
             A::vector(std::array::from_fn(|i| {
-                A::min(A::vector_coord(&start, i), A::vector_coord(&end, i))
+                A::min(A::vector_coord(start, i), A::vector_coord(end, i))
             })),
             A::vector(std::array::from_fn(|i| {
-                A::max(A::vector_coord(&start, i), A::vector_coord(&end, i))
+                A::max(A::vector_coord(start, i), A::vector_coord(end, i))
             })),
         )
     };
@@ -338,10 +400,10 @@ fn arc_bounds<const DIM: usize, A: Adaptor<DIM> + TrigonometryAdaptor>(
         let (rmin, rmax) = arc_bounds::<DIM, A>(center, radius, mid_dir, new_mid, end_dir, half);
         return (
             A::vector(std::array::from_fn(|i| {
-                A::min(A::vector_coord(&lmin, i), A::vector_coord(&rmin, i))
+                A::min(A::vector_coord(lmin, i), A::vector_coord(rmin, i))
             })),
             A::vector(std::array::from_fn(|i| {
-                A::max(A::vector_coord(&lmax, i), A::vector_coord(&rmax, i))
+                A::max(A::vector_coord(lmax, i), A::vector_coord(rmax, i))
             })),
         );
     }
@@ -356,11 +418,11 @@ fn arc_bounds<const DIM: usize, A: Adaptor<DIM> + TrigonometryAdaptor>(
     let numer = end_dir - start_dir * cos;
     let denom = start_dir * sin;
     let inv_sin = A::scalar(1.0) / sin;
-    let numer = A::coord_arr(&numer);
-    let denom = A::coord_arr(&denom);
-    let center = A::coord_arr(&center);
-    let mut min = A::coord_arr(&min);
-    let mut max = A::coord_arr(&max);
+    let numer = A::coord_arr(numer);
+    let denom = A::coord_arr(denom);
+    let center = A::coord_arr(center);
+    let mut min = A::coord_arr(min);
+    let mut max = A::coord_arr(max);
     let short = angle < A::scalar(PI);
     for ci in 0..DIM {
         let n = numer[ci];
@@ -394,9 +456,9 @@ fn arc_bounds<const DIM: usize, A: Adaptor<DIM> + TrigonometryAdaptor>(
 }
 
 /// Check radius and angle invariants. Call early, as soon as both are known.
-fn check_radius_and_angle<const DIM: usize, A: Adaptor<DIM>>(
-    radius: A::Scalar,
-    angle: A::Scalar,
+fn check_radius_and_angle<A: ScalarAdaptor>(
+    radius: A::Float,
+    angle: A::Float,
 ) -> Result<(), Error> {
     assert!(
         angle >= A::scalar(0.) && angle <= A::scalar(TAU),
@@ -411,59 +473,78 @@ fn check_radius_and_angle<const DIM: usize, A: Adaptor<DIM>>(
     }
 }
 
-/// Rotate unit vector `v` around unit axis `axis` by `angle` radians (Rodrigues' formula).
-fn rotate_around<const DIM: usize, A>(v: A::Vector, axis: A::Vector, angle: A::Scalar) -> A::Vector
-where
-    A: TrigonometryAdaptor + CrossProductAdaptor<DIM>,
-{
-    let (s, c) = A::sin_cos(angle);
-    v * c + A::cross(&axis, &v) * s + axis * A::dot_product(&axis, &v) * (A::scalar(1.0) - c)
-}
-
-/// Circumcircle of three 3D points. Returns (center, radius, normal).
+/// Circumcircle of three points in any dimension. Returns (center, radius).
+///
+/// Solves the 2×2 system: writing P = a + s·u + t·v (u = b-a, v = c-a),
+/// equidistance from a, b, c gives:
+///   |u|²·s + (u·v)·t = |u|²/2
+///   (u·v)·s + |v|²·t = |v|²/2
+/// The determinant |u|²|v|² − (u·v)² equals |u×v|² (Lagrange identity), so it
+/// is zero iff the three points are collinear.
 fn circumcircle<const DIM: usize, A>(
     a: A::Vector,
     b: A::Vector,
     c: A::Vector,
-) -> Option<(A::Vector, A::Scalar, A::Vector)>
+) -> Option<(A::Vector, A::Scalar)>
 where
-    A: CrossProductAdaptor<DIM>,
+    A: Adaptor<DIM>,
 {
-    let ca = c - a;
-    let ba = b - a;
-    let crs = A::cross(&ba, &ca);
-    let crs_len2 = A::vector_length_sq(&crs);
-    if crs_len2 < A::scalar(f64::EPSILON) {
+    let u = b - a;
+    let v = c - a;
+    let uu = A::dot_product(u, u);
+    let uv = A::dot_product(u, v);
+    let vv = A::dot_product(v, v);
+    let det = uu * vv - uv * uv;
+    if det < A::scalar(f64::EPSILON) {
         return None;
     }
-    let ca_len2 = A::vector_length_sq(&ca);
-    let ba_len2 = A::vector_length_sq(&ba);
-    let rvec = (A::cross(&crs, &ba) * ca_len2 + A::cross(&ca, &crs) * ba_len2)
-        / (A::scalar(2.0) * crs_len2);
+    let s = vv * (uu - uv) / (A::scalar(2.0) * det);
+    let t = uu * (vv - uv) / (A::scalar(2.0) * det);
+    let rvec = u * s + v * t;
     let center = a + rvec;
-    let radius = A::vector_length(&rvec);
-    let normal = A::normalize(crs);
-    Some((center, radius, normal))
+    let radius = A::vector_length(rvec);
+    Some((center, radius))
 }
 
-/// Oriented angle from `from` to `to` around `normal`, in [0, 2π).
-fn oriented_angle<const DIM: usize, A>(
-    from: A::Vector,
-    to: A::Vector,
-    normal: A::Vector,
-) -> A::Scalar
+fn calc_arc_middle<const DIM: usize, A>(
+    start: A::Vector,
+    mid_guess: A::Vector,
+    end: A::Vector,
+) -> Option<A::Vector>
 where
-    A: CrossProductAdaptor<DIM> + TrigonometryAdaptor,
+    A: Adaptor<DIM>,
 {
-    let f = A::normalize(from);
-    let t = A::normalize(to);
-    let dot = A::clamp(A::dot_product(&f, &t), A::scalar(-1.0), A::scalar(1.0));
-    let cross = A::cross(&f, &t);
-    let angle = A::acos(dot);
-    if A::dot_product(&cross, &normal) < A::scalar(0.0) {
-        A::scalar(TAU) - angle
+    let mut mid = start + end;
+    let len_mid = A::vector_length(mid);
+    if len_mid < A::epsilon() {
+        // This is a semi circle. We need to figure out the perpendicular direcion.
+        let vperp = mid_guess - start * A::dot_product(mid_guess, start);
+        let len = A::vector_length(vperp);
+        if len < A::epsilon() {
+            // mid_bias is collinear.
+            None
+        } else {
+            Some(vperp / len)
+        }
     } else {
-        angle
+        mid /= len_mid;
+        let dir = A::normalize(end - start);
+        let mid_perp = {
+            let diff = mid - start;
+            diff - dir * A::dot_product(diff, dir)
+        };
+        let bias_perp = {
+            let diff = mid_guess - start;
+            diff - dir * A::dot_product(diff, dir)
+        };
+        if A::vector_length(bias_perp) < A::epsilon() {
+            // Collinear.
+            return None;
+        }
+        if A::dot_product(mid_perp, bias_perp) < A::scalar(0.0) {
+            mid = -mid;
+        }
+        Some(mid)
     }
 }
 
@@ -597,6 +678,9 @@ mod test {
         // Endpoints exact.
         assert!((arc.start()[0] + 1.0).abs() < 1e-10);
         assert!((arc.end()[0] - 1.0).abs() < 1e-10);
+        // CW in XY plane (angles π → π/2 → 0) → normal = -Z.
+        let n = arc.intrinsic_normal();
+        assert!((n - DVec([0.0, 0.0, -1.0])).length() < 1e-10);
     }
 
     #[test]
@@ -618,6 +702,9 @@ mod test {
             arc.length(),
             expected_len
         );
+        // CCW in XY plane → normal = +Z.
+        let n = arc.intrinsic_normal();
+        assert!((n - DVec([0.0, 0.0, 1.0])).length() < 1e-10);
     }
 
     #[test]
@@ -640,6 +727,51 @@ mod test {
         let mid = arc.point(expected_len / 2.0).unwrap();
         assert!((mid[0]).abs() < 1e-6);
         assert!((mid[1] + 1.0).abs() < 1e-6, "mid.y = {}", mid[1]);
+        // CW in XY plane → normal = -Z.
+        let n = arc.intrinsic_normal();
+        assert!((n - DVec([0.0, 0.0, -1.0])).length() < 1e-10);
+    }
+
+    #[test]
+    fn t_major_arc_obtuse_triangle() {
+        // Unit circle. start=0°, middle=270°, end=60°.
+        // Going CW from 0° through 270° to 60° is the major arc (sweep = 300° = 5π/3).
+        // The three points form an obtuse triangle (angle at start ≈ 105°).
+        let start = DVec([1.0, 0.0, 0.0]);
+        let middle = DVec([0.0, -1.0, 0.0]); // 270° — on the CW/major arc
+        let end = DVec([0.5, 3f64.sqrt() / 2.0, 0.0]); // 60°
+        let arc = Arc3d::from_three_points(start, middle, end).unwrap();
+        let expected_sweep = 5.0 * PI / 3.0; // 300°
+        assert!(
+            arc.angle() > PI,
+            "expected major arc (sweep > π), got angle = {}",
+            arc.angle()
+        );
+        assert!(
+            (arc.angle() - expected_sweep).abs() < 1e-10,
+            "expected sweep = 5π/3, got {}",
+            arc.angle()
+        );
+        assert!(
+            (arc.radius() - 1.0).abs() < 1e-10,
+            "expected radius = 1, got {}",
+            arc.radius()
+        );
+        // True midpoint of a 300° arc starting at 0° going CW is at 0° − 150° = 210°.
+        let arc_mid = arc.point(arc.length() / 2.0).unwrap();
+        let expected_mid = DVec([-(3f64.sqrt() / 2.0), -0.5, 0.0]); // cos210°, sin210°
+        assert!(
+            (arc_mid[0] - expected_mid[0]).abs() < 1e-6,
+            "mid.x: {} != {}",
+            arc_mid[0],
+            expected_mid[0]
+        );
+        assert!(
+            (arc_mid[1] - expected_mid[1]).abs() < 1e-6,
+            "mid.y: {} != {}",
+            arc_mid[1],
+            expected_mid[1]
+        );
     }
 
     #[test]
@@ -775,7 +907,7 @@ mod test {
         // For a circular arc, the midpoint of each chord deviates from the circle
         // by the sagitta: h = r(1 - cos(α/2)), where α is the step angle.
         // With tolerance t, max_angle = 2*acos(1 - t/r), so h ≤ t.
-        let cases: &[(DVec3, DVec3, DVec3, f64)] = &[
+        const CASES: &[(DVec3, DVec3, DVec3, f64)] = &[
             // Semicircle, r=3, XY plane
             (
                 DVec([3.0, 0.0, 0.0]),
@@ -826,7 +958,7 @@ mod test {
                 0.005,
             ),
         ];
-        for (i, &(p0, p1, p2, tol)) in cases.iter().enumerate() {
+        for (i, &(p0, p1, p2, tol)) in CASES.iter().enumerate() {
             let arc = Arc3d::from_three_points(p0, p1, p2).unwrap();
             let r = arc.radius();
             let center = arc.center();
@@ -1098,13 +1230,135 @@ mod test {
         );
     }
 
-    // ===================== from_center_normal_start_angle =====================
+    #[test]
+    fn t_start_tangent_end_major_arc() {
+        // Unit circle. start=(1,0,0), CW tangent=(0,-1,0), end=(0,1,0).
+        // CW from 0° through 270° to 90° → sweep = 3π/2, midpoint at 225°.
+        let arc = Arc3d::from_start_tangent_end(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([0.0, -1.0, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+        )
+        .unwrap();
+        assert!(
+            (arc.radius() - 1.0).abs() < 1e-10,
+            "radius = {}",
+            arc.radius()
+        );
+        assert!(
+            arc.angle() > PI,
+            "expected major arc, got angle = {}",
+            arc.angle()
+        );
+        assert!(
+            (arc.angle() - 3.0 * PI / 2.0).abs() < 1e-10,
+            "sweep = {}",
+            arc.angle()
+        );
+        assert_arc_valid(&arc, DVec([1.0, 0.0, 0.0]), DVec([0.0, 1.0, 0.0]), 1e-6);
+        let mid = arc.point(arc.length() / 2.0).unwrap();
+        assert!((mid[0] + FRAC_1_SQRT_2).abs() < 1e-6, "mid.x = {}", mid[0]);
+        assert!((mid[1] + FRAC_1_SQRT_2).abs() < 1e-6, "mid.y = {}", mid[1]);
+    }
 
     #[test]
-    fn t_center_normal_start_angle_quarter() {
-        let arc = Arc3d::from_center_normal_start_angle(
-            DVec([0.0, 0.0, 0.0]),
-            DVec([0.0, 0.0, 1.0]),
+    fn t_start_tangent_end_off_origin_center() {
+        // Circle radius 2, center at (3,4,0). Quarter circle CCW from (5,4,0) to (3,6,0).
+        let arc = Arc3d::from_start_tangent_end(
+            DVec([5.0, 4.0, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+            DVec([3.0, 6.0, 0.0]),
+        )
+        .unwrap();
+        assert!(
+            (arc.radius() - 2.0).abs() < 1e-10,
+            "radius = {}",
+            arc.radius()
+        );
+        assert!(
+            (arc.angle() - PI / 2.0).abs() < 1e-10,
+            "sweep = {}",
+            arc.angle()
+        );
+        let c = arc.center();
+        assert!((c[0] - 3.0).abs() < 1e-10, "center.x = {}", c[0]);
+        assert!((c[1] - 4.0).abs() < 1e-10, "center.y = {}", c[1]);
+        assert_arc_valid(&arc, DVec([5.0, 4.0, 0.0]), DVec([3.0, 6.0, 0.0]), 1e-6);
+        // Midpoint of quarter arc is at 45° from center: (3+√2, 4+√2, 0).
+        let mid = arc.point(arc.length() / 2.0).unwrap();
+        assert!(
+            (mid[0] - (3.0 + 2f64.sqrt())).abs() < 1e-6,
+            "mid.x = {}",
+            mid[0]
+        );
+        assert!(
+            (mid[1] - (4.0 + 2f64.sqrt())).abs() < 1e-6,
+            "mid.y = {}",
+            mid[1]
+        );
+    }
+
+    #[test]
+    fn t_start_tangent_end_non_unit_tangent() {
+        // Same geometry as the semicircle test but with a non-normalised tangent.
+        // The function normalises internally so the result must be identical.
+        let arc = Arc3d::from_start_tangent_end(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([0.0, 5.0, 0.0]), // length 5, same direction as (0,1,0)
+            DVec([-1.0, 0.0, 0.0]),
+        )
+        .unwrap();
+        assert!((arc.radius() - 1.0).abs() < 1e-6);
+        assert!((arc.length() - PI).abs() < 1e-6);
+        assert_arc_valid(&arc, DVec([1.0, 0.0, 0.0]), DVec([-1.0, 0.0, 0.0]), 1e-6);
+    }
+
+    #[test]
+    fn t_2d_start_tangent_end_quarter_circle() {
+        // 2D unit circle, CCW quarter arc from (1,0) to (0,1).
+        let arc =
+            Arc2d::from_start_tangent_end(DVec([1.0, 0.0]), DVec([0.0, 1.0]), DVec([0.0, 1.0]))
+                .unwrap();
+        assert!((arc.radius() - 1.0).abs() < 1e-10);
+        assert!((arc.angle() - PI / 2.0).abs() < 1e-10);
+        let mid = arc.point(arc.length() / 2.0).unwrap();
+        assert!((mid[0] - FRAC_1_SQRT_2).abs() < 1e-6, "mid.x = {}", mid[0]);
+        assert!((mid[1] - FRAC_1_SQRT_2).abs() < 1e-6, "mid.y = {}", mid[1]);
+    }
+
+    #[test]
+    fn t_2d_start_tangent_end_major_arc() {
+        // 2D unit circle. CW from (1,0) through 270° to (0,1) → sweep = 3π/2.
+        let arc =
+            Arc2d::from_start_tangent_end(DVec([1.0, 0.0]), DVec([0.0, -1.0]), DVec([0.0, 1.0]))
+                .unwrap();
+        assert!(
+            (arc.radius() - 1.0).abs() < 1e-10,
+            "radius = {}",
+            arc.radius()
+        );
+        assert!(
+            arc.angle() > PI,
+            "expected major arc, got angle = {}",
+            arc.angle()
+        );
+        assert!(
+            (arc.angle() - 3.0 * PI / 2.0).abs() < 1e-10,
+            "sweep = {}",
+            arc.angle()
+        );
+        let mid = arc.point(arc.length() / 2.0).unwrap();
+        assert!((mid[0] + FRAC_1_SQRT_2).abs() < 1e-6, "mid.x = {}", mid[0]);
+        assert!((mid[1] + FRAC_1_SQRT_2).abs() < 1e-6, "mid.y = {}", mid[1]);
+    }
+
+    // ===================== from_axis_start_angle =====================
+
+    #[test]
+    fn t_axis_start_angle_quarter() {
+        // Axis along Z through origin, start at (1,0,0), sweep π/2 CCW.
+        let arc = Arc3d::from_axis_start_angle(
+            (DVec([0.0, 0.0, 0.0]), DVec([0.0, 0.0, 1.0])),
             DVec([1.0, 0.0, 0.0]),
             PI / 2.0,
         )
@@ -1112,30 +1366,31 @@ mod test {
         assert!((arc.radius() - 1.0).abs() < 1e-10);
         assert!((arc.length() - PI / 2.0).abs() < 1e-10);
         assert_arc_valid(&arc, DVec([1.0, 0.0, 0.0]), DVec([0.0, 1.0, 0.0]), 1e-6);
+        let n = arc.intrinsic_normal();
+        assert!((n - DVec([0.0, 0.0, 1.0])).length() < 1e-10);
     }
 
     #[test]
-    fn t_center_normal_start_angle_negative() {
+    fn t_axis_start_angle_negative() {
         // Negative angle = CW.
-        let arc = Arc3d::from_center_normal_start_angle(
-            DVec([0.0, 0.0, 0.0]),
-            DVec([0.0, 0.0, 1.0]),
+        let arc = Arc3d::from_axis_start_angle(
+            (DVec([0.0, 0.0, 0.0]), DVec([0.0, 0.0, 1.0])),
             DVec([1.0, 0.0, 0.0]),
             -PI / 2.0,
         )
         .unwrap();
         assert!((arc.length() - PI / 2.0).abs() < 1e-10);
-        // End should be at (0,-1,0) for CW quarter.
         assert!((arc.end() - DVec([0.0, -1.0, 0.0])).length() < 1e-6);
         assert_arc_valid(&arc, DVec([1.0, 0.0, 0.0]), DVec([0.0, -1.0, 0.0]), 1e-6);
+        let n = arc.intrinsic_normal();
+        assert!((n - DVec([0.0, 0.0, -1.0])).length() < 1e-6);
     }
 
     #[test]
-    fn t_center_normal_start_angle_large_arc() {
-        // 270 degrees.
-        let arc = Arc3d::from_center_normal_start_angle(
-            DVec([0.0, 0.0, 0.0]),
-            DVec([0.0, 0.0, 1.0]),
+    fn t_axis_start_angle_large_arc() {
+        // 270 degrees, radius 5.
+        let arc = Arc3d::from_axis_start_angle(
+            (DVec([0.0, 0.0, 0.0]), DVec([0.0, 0.0, 1.0])),
             DVec([5.0, 0.0, 0.0]),
             3.0 * PI / 2.0,
         )
@@ -1146,11 +1401,10 @@ mod test {
     }
 
     #[test]
-    fn t_center_normal_start_angle_full_circle_fails() {
+    fn t_axis_start_angle_full_circle_fails() {
         assert!(
-            Arc3d::from_center_normal_start_angle(
-                DVec([0.0, 0.0, 0.0]),
-                DVec([0.0, 0.0, 1.0]),
+            Arc3d::from_axis_start_angle(
+                (DVec([0.0, 0.0, 0.0]), DVec([0.0, 0.0, 1.0])),
                 DVec([1.0, 0.0, 0.0]),
                 TAU,
             )
@@ -1159,12 +1413,12 @@ mod test {
     }
 
     #[test]
-    fn t_center_normal_start_angle_zero_radius_fails() {
+    fn t_axis_start_angle_start_on_axis_fails() {
+        // Start lies exactly on the axis → radius = 0.
         assert!(
-            Arc3d::from_center_normal_start_angle(
-                DVec([0.0, 0.0, 0.0]),
-                DVec([0.0, 0.0, 1.0]),
-                DVec([0.0, 0.0, 0.0]), // start == center
+            Arc3d::from_axis_start_angle(
+                (DVec([0.0, 0.0, 0.0]), DVec([0.0, 0.0, 1.0])),
+                DVec([0.0, 0.0, 0.5]),
                 PI / 2.0,
             )
             .is_err()
@@ -1172,11 +1426,11 @@ mod test {
     }
 
     #[test]
-    fn t_center_normal_start_angle_zero_normal_fails() {
+    fn t_axis_start_angle_degenerate_axis_fails() {
+        // Both axis points identical → zero-length normal.
         assert!(
-            Arc3d::from_center_normal_start_angle(
-                DVec([0.0, 0.0, 0.0]),
-                DVec([0.0, 0.0, 0.0]),
+            Arc3d::from_axis_start_angle(
+                (DVec([1.0, 2.0, 3.0]), DVec([1.0, 2.0, 3.0])),
                 DVec([1.0, 0.0, 0.0]),
                 PI / 2.0,
             )
@@ -1185,31 +1439,152 @@ mod test {
     }
 
     #[test]
-    fn t_center_normal_start_angle_not_in_plane_fails() {
-        // Start not perpendicular to normal.
+    fn t_axis_start_angle_off_plane_projects() {
+        // Start has a Z component — the function should project it to the plane
+        // and still produce a valid arc, not fail.
+        let arc = Arc3d::from_axis_start_angle(
+            (DVec([0.0, 0.0, 0.0]), DVec([0.0, 0.0, 1.0])),
+            DVec([1.0, 0.0, 1.0]), // not perpendicular to Z axis
+            PI / 2.0,
+        )
+        .unwrap();
+        // Projected start is (1,0,0) at z=1, center is (0,0,1), radius = 1.
+        assert!((arc.radius() - 1.0).abs() < 1e-10);
+        let c = arc.center();
+        assert!((c[0]).abs() < 1e-10, "center.x = {}", c[0]);
+        assert!((c[1]).abs() < 1e-10, "center.y = {}", c[1]);
+        assert!((c[2] - 1.0).abs() < 1e-10, "center.z = {}", c[2]);
+        // End should be at (0,1,1).
+        assert!((arc.end() - DVec([0.0, 1.0, 1.0])).length() < 1e-6);
+    }
+
+    #[test]
+    fn t_axis_start_angle_3d_tilted() {
+        // Tilted axis through (5,5,5) in direction (1,1,1).
+        let center = DVec([5.0, 5.0, 5.0]);
+        let axis_dir = DVec([1.0, 1.0, 1.0]);
+        let start_dir = DVec([1.0, -1.0, 0.0]).normalize();
+        let radius = 3.0;
+        let start = center + start_dir * radius;
+        let arc =
+            Arc3d::from_axis_start_angle((center, center + axis_dir), start, PI / 3.0).unwrap();
+        assert!((arc.radius() - radius).abs() < 1e-6);
+        assert_arc_valid(&arc, start, arc.end(), 1e-6);
+        let n = arc.intrinsic_normal();
+        let expected_normal = axis_dir.normalize();
         assert!(
-            Arc3d::from_center_normal_start_angle(
-                DVec([0.0, 0.0, 0.0]),
-                DVec([0.0, 0.0, 1.0]),
-                DVec([1.0, 0.0, 1.0]), // has Z component
-                PI / 2.0,
-            )
-            .is_err()
+            (n - expected_normal).length() < 1e-6,
+            "intrinsic normal = {:?}",
+            n
         );
     }
 
     #[test]
-    fn t_center_normal_start_angle_3d() {
-        // Arc3d in a tilted plane.
-        let normal = DVec([1.0, 1.0, 1.0]).normalize();
-        // Start must be perpendicular to normal from center. Pick a point in the plane.
-        let start_dir = DVec([1.0, -1.0, 0.0]).normalize();
-        let center = DVec([5.0, 5.0, 5.0]);
-        let radius = 3.0;
-        let start = center + start_dir * radius;
-        let arc = Arc3d::from_center_normal_start_angle(center, normal, start, PI / 3.0).unwrap();
-        assert!((arc.radius() - radius).abs() < 1e-6);
-        assert_arc_valid(&arc, start, arc.end(), 1e-6);
+    fn t_axis_start_angle_offset_center() {
+        // Axis does NOT pass through origin. Axis along Z through (3,4,0).
+        // Start at (5,4,0) → radius = 2, center inferred at (3,4,0).
+        let arc = Arc3d::from_axis_start_angle(
+            (DVec([3.0, 4.0, 0.0]), DVec([3.0, 4.0, 1.0])),
+            DVec([5.0, 4.0, 0.0]),
+            PI / 2.0,
+        )
+        .unwrap();
+        assert!((arc.radius() - 2.0).abs() < 1e-10);
+        let c = arc.center();
+        assert!((c[0] - 3.0).abs() < 1e-10);
+        assert!((c[1] - 4.0).abs() < 1e-10);
+        assert!((c[2]).abs() < 1e-10);
+        assert!((arc.end() - DVec([3.0, 6.0, 0.0])).length() < 1e-6);
+    }
+
+    // ── intrinsic_normal dedicated tests ─────────────────────────────
+
+    #[test]
+    fn t_intrinsic_normal_perpendicular_to_arc() {
+        // The normal must be perpendicular to every tangent and every radial direction.
+        let arc = Arc3d::from_three_points(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([0.0, 1.0, 1.0]),
+            DVec([-1.0, 0.0, 0.0]),
+        )
+        .unwrap();
+        let n = arc.intrinsic_normal();
+        let len = arc.length();
+        for i in 0..=20 {
+            let t = len * i as f64 / 20.0;
+            let p = arc.point(t).unwrap();
+            let radial = (p - arc.center()).normalize();
+            assert!(
+                n.dot(radial).abs() < 1e-6,
+                "normal not perpendicular to radial at t={t}: dot={}",
+                n.dot(radial)
+            );
+            let tan = arc.tangent(t).unwrap();
+            assert!(
+                n.dot(tan).abs() < 1e-6,
+                "normal not perpendicular to tangent at t={t}: dot={}",
+                n.dot(tan)
+            );
+        }
+    }
+
+    #[test]
+    fn t_intrinsic_normal_is_unit() {
+        let arc = Arc3d::from_three_points(
+            DVec([3.0, 0.0, 0.0]),
+            DVec([0.0, 3.0, 0.0]),
+            DVec([-3.0, 0.0, 0.0]),
+        )
+        .unwrap();
+        let n = arc.intrinsic_normal();
+        assert!(
+            (n.length() - 1.0).abs() < 1e-10,
+            "|normal| = {}",
+            n.length()
+        );
+    }
+
+    #[test]
+    fn t_intrinsic_normal_reversed_flips() {
+        let arc = Arc3d::from_three_points(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+            DVec([-1.0, 0.0, 0.0]),
+        )
+        .unwrap();
+        let rev = arc.clone().reversed();
+        let n_fwd = arc.intrinsic_normal();
+        let n_rev = rev.intrinsic_normal();
+        // Reversing an arc reverses the sweep direction, so the normal must flip.
+        assert!(
+            (n_fwd + n_rev).length() < 1e-10,
+            "forward normal {:?} + reversed normal {:?} should be zero",
+            n_fwd,
+            n_rev
+        );
+    }
+
+    #[test]
+    fn t_intrinsic_normal_from_start_tangent_end() {
+        // CCW quarter circle in XY → normal = +Z.
+        let arc = Arc3d::from_start_tangent_end(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+        )
+        .unwrap();
+        let n = arc.intrinsic_normal();
+        assert!((n - DVec([0.0, 0.0, 1.0])).length() < 1e-10);
+
+        // CW major arc → normal = -Z.
+        let arc = Arc3d::from_start_tangent_end(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([0.0, -1.0, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+        )
+        .unwrap();
+        let n = arc.intrinsic_normal();
+        assert!((n - DVec([0.0, 0.0, -1.0])).length() < 1e-10);
     }
 
     // ── bounds tests ─────────────────────────────────────────────────
@@ -1397,5 +1772,343 @@ mod test {
         eprintln!("bounds lo.x = {}, actual min_x = {}", lo[0], min_x);
         eprintln!("angle = {}, radius = {}", arc.angle(), arc.radius());
         eprintln!("center = {:?}", arc.center());
+    }
+
+    // ── 2D arc tests ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn t_2d_quarter_circle() {
+        // Unit circle, CCW from (1,0) through (√2/2, √2/2) to (0,1). Sweep = π/2.
+        let arc = Arc2d::from_three_points(
+            DVec([1.0, 0.0]),
+            DVec([FRAC_1_SQRT_2, FRAC_1_SQRT_2]),
+            DVec([0.0, 1.0]),
+        )
+        .unwrap();
+        assert!((arc.radius() - 1.0).abs() < 1e-10);
+        assert!((arc.angle() - PI / 2.0).abs() < 1e-10);
+        assert!((arc.length() - PI / 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn t_2d_semicircle() {
+        // Unit circle, CCW from (-1,0) through (0,1) to (1,0). Sweep = π.
+        let arc = Arc2d::from_three_points(DVec([-1.0, 0.0]), DVec([0.0, 1.0]), DVec([1.0, 0.0]))
+            .unwrap();
+        assert!((arc.radius() - 1.0).abs() < 1e-10);
+        assert!((arc.angle() - PI).abs() < 1e-10);
+        let mid = arc.point(arc.length() / 2.0).unwrap();
+        assert!(mid[0].abs() < 1e-10);
+        assert!((mid[1] - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn t_2d_major_arc() {
+        // Unit circle, CW from (1,0) through (0,-1) to (0,1). Sweep = 3π/2.
+        // (1,0) and (0,1) are not antipodal, so this is a genuine major arc.
+        let arc = Arc2d::from_three_points(DVec([1.0, 0.0]), DVec([0.0, -1.0]), DVec([0.0, 1.0]))
+            .unwrap();
+        assert!((arc.radius() - 1.0).abs() < 1e-10);
+        assert!(
+            arc.angle() > PI,
+            "expected major arc, got angle = {}",
+            arc.angle()
+        );
+        assert!((arc.angle() - 3.0 * PI / 2.0).abs() < 1e-10);
+        // True midpoint at 0° − 135° = 225°.
+        let mid = arc.point(arc.length() / 2.0).unwrap();
+        assert!((mid[0] + FRAC_1_SQRT_2).abs() < 1e-6, "mid.x = {}", mid[0]);
+        assert!((mid[1] + FRAC_1_SQRT_2).abs() < 1e-6, "mid.y = {}", mid[1]);
+    }
+
+    #[test]
+    fn t_2d_major_arc_obtuse_triangle() {
+        // Unit circle. start=0°, middle=270°, end=60°. Sweep = 300° = 5π/3.
+        let arc = Arc2d::from_three_points(
+            DVec([1.0, 0.0]),
+            DVec([0.0, -1.0]),
+            DVec([0.5, 3f64.sqrt() / 2.0]),
+        )
+        .unwrap();
+        let expected_sweep = 5.0 * PI / 3.0;
+        assert!(
+            arc.angle() > PI,
+            "expected major arc, got angle = {}",
+            arc.angle()
+        );
+        assert!(
+            (arc.angle() - expected_sweep).abs() < 1e-10,
+            "sweep: {} != 5π/3",
+            arc.angle()
+        );
+        // True midpoint at 0° − 150° = 210°.
+        let arc_mid = arc.point(arc.length() / 2.0).unwrap();
+        assert!(
+            (arc_mid[0] - (-(3f64.sqrt() / 2.0))).abs() < 1e-6,
+            "mid.x = {}",
+            arc_mid[0]
+        );
+        assert!((arc_mid[1] + 0.5).abs() < 1e-6, "mid.y = {}", arc_mid[1]);
+    }
+
+    #[test]
+    fn t_2d_off_origin_center() {
+        // Circle of radius 3 centered at (5, -2). Three points on it.
+        let cx = 5.0_f64;
+        let cy = -2.0_f64;
+        let r = 3.0_f64;
+        let arc =
+            Arc2d::from_three_points(DVec([cx + r, cy]), DVec([cx, cy + r]), DVec([cx - r, cy]))
+                .unwrap();
+        assert!(
+            (arc.radius() - r).abs() < 1e-10,
+            "radius = {}",
+            arc.radius()
+        );
+        assert!((arc.angle() - PI).abs() < 1e-10, "angle = {}", arc.angle());
+        let start = arc.start();
+        assert!((start[0] - (cx + r)).abs() < 1e-10);
+        assert!((start[1] - cy).abs() < 1e-10);
+    }
+
+    #[test]
+    fn t_2d_endpoints() {
+        // Arc endpoints must match the input start and end points.
+        let start = DVec([1.0, 0.0]);
+        let end = DVec([0.0, 1.0]);
+        let arc =
+            Arc2d::from_three_points(start, DVec([FRAC_1_SQRT_2, FRAC_1_SQRT_2]), end).unwrap();
+        assert!((arc.start()[0] - start[0]).abs() < 1e-10);
+        assert!((arc.start()[1] - start[1]).abs() < 1e-10);
+        assert!((arc.end()[0] - end[0]).abs() < 1e-10);
+        assert!((arc.end()[1] - end[1]).abs() < 1e-10);
+    }
+
+    #[test]
+    fn t_2d_collinear_returns_err() {
+        // Three collinear points must return an error.
+        let result = Arc2d::from_three_points(DVec([0.0, 0.0]), DVec([1.0, 0.0]), DVec([2.0, 0.0]));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn t_2d_reversed() {
+        let arc = Arc2d::from_three_points(DVec([-1.0, 0.0]), DVec([0.0, 1.0]), DVec([1.0, 0.0]))
+            .unwrap();
+        let rev = arc.clone().reversed();
+        let len = arc.length();
+        assert!((len - rev.length()).abs() < 1e-12);
+        assert!((arc.start()[0] - rev.end()[0]).abs() < 1e-10);
+        assert!((arc.end()[0] - rev.start()[0]).abs() < 1e-10);
+        let n = 20;
+        for i in 0..=n {
+            let t = len * i as f64 / n as f64;
+            let fwd = arc.point(t).unwrap();
+            let bwd = rev.point(len - t).unwrap();
+            let err = (fwd - bwd).length();
+            assert!(err < 1e-10, "mismatch at t={t}: err={err}");
+        }
+    }
+
+    #[test]
+    fn t_2d_tangent_perpendicular_to_radius() {
+        let arc = Arc2d::from_three_points(DVec([1.0, 0.0]), DVec([0.0, 1.0]), DVec([-1.0, 0.0]))
+            .unwrap();
+        let len = arc.length();
+        for i in 0..=10 {
+            let t = len * i as f64 / 10.0;
+            let p = arc.point(t).unwrap();
+            let tan = arc.tangent(t).unwrap();
+            let radial = (p - arc.center()).normalize();
+            let dot = radial.dot(tan).abs();
+            assert!(dot < 1e-6, "tangent not perpendicular at t={t}: dot={dot}");
+            let mag = tan.length();
+            assert!(
+                (mag - 1.0).abs() < 1e-6,
+                "tangent not unit length at t={t}: |tan|={mag}"
+            );
+        }
+    }
+
+    #[test]
+    fn t_2d_unit_speed_parameterization() {
+        let arc = Arc2d::from_three_points(DVec([2.0, 0.0]), DVec([0.0, 2.0]), DVec([-2.0, 0.0]))
+            .unwrap();
+        let len = arc.length();
+        let dt = 1e-7;
+        for i in 0..10 {
+            let t = len * i as f64 / 10.0;
+            let p0 = arc.point(t).unwrap();
+            let p1 = arc.point(t + dt).unwrap();
+            let speed = (p1 - p0).length() / dt;
+            assert!(
+                (speed - 1.0).abs() < 1e-4,
+                "numerical speed at t={t}: {speed} != 1.0"
+            );
+            let mag = arc.tangent(t).unwrap().length();
+            assert!(
+                (mag - 1.0).abs() < 1e-6,
+                "tangent magnitude at t={t}: {mag} != 1.0"
+            );
+        }
+    }
+
+    #[test]
+    fn t_2d_out_of_domain_returns_none() {
+        let arc = Arc2d::from_three_points(DVec([1.0, 0.0]), DVec([0.0, 1.0]), DVec([-1.0, 0.0]))
+            .unwrap();
+        assert!(arc.point(-1.0).is_none());
+        assert!(arc.point(arc.length() + 1.0).is_none());
+    }
+
+    #[test]
+    fn t_2d_adaptive_samples_deviation() {
+        // Test cases as three points and a radius per arc.
+        const CASES: &[([[f64; 2]; 3], f64)] = &[
+            ([[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0]], 0.01), // semicircle r=1
+            ([[3.0, 0.0], [0.0, 3.0], [-3.0, 0.0]], 0.01), // semicircle r=3
+            (
+                [[1.0, 0.0], [FRAC_1_SQRT_2, FRAC_1_SQRT_2], [0.0, 1.0]], // quarter circle
+                0.001,
+            ),
+            ([[100.0, 0.0], [0.0, 100.0], [-100.0, 0.0]], 0.1), // large radius
+            ([[1.0, 0.0], [0.0, -1.0], [-1.0, 0.0]], 0.01),     // other semicircle
+            ([[10.0, 5.0], [7.0, 8.0], [4.0, 5.0]], 0.005),     // off-origin center
+        ];
+        for (i, &([p0, p1, p2], tol)) in CASES.iter().enumerate() {
+            let arc = Arc2d::from_three_points(DVec(p0), DVec(p1), DVec(p2)).unwrap();
+            let r = arc.radius();
+            let center = arc.center();
+            let samples: Vec<_> = arc.adaptive_samples(tol).collect();
+            assert!(
+                samples.len() > 2,
+                "case {i}: too few samples: {}",
+                samples.len()
+            );
+            for pair in samples.windows(2) {
+                let mid = (pair[0] + pair[1]) * 0.5;
+                let deviation = ((mid - center).length() - r).abs();
+                assert!(
+                    deviation <= tol + 1e-10,
+                    "case {i}: deviation {deviation} > tolerance {tol}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn t_2d_point_with_derivs_matches_point_and_tangent() {
+        let arc = Arc2d::from_three_points(DVec([1.0, 0.0]), DVec([0.0, 1.0]), DVec([-1.0, 0.0]))
+            .unwrap();
+        let len = arc.length();
+        let mut results = [DVec([0.0, 0.0]); 3];
+        for i in 0..=10 {
+            let t = len * i as f64 / 10.0;
+            arc.point_with_derivs(t, &mut results).unwrap();
+            let err_p = (results[0] - arc.point(t).unwrap()).length();
+            let err_t = (results[1] - arc.tangent(t).unwrap()).length();
+            assert!(err_p < 1e-12, "point mismatch at t={t}: {err_p}");
+            assert!(err_t < 1e-12, "tangent mismatch at t={t}: {err_t}");
+        }
+    }
+
+    #[test]
+    fn t_2d_point_with_derivs_curvature() {
+        // d²p/ds² has magnitude 1/r and points toward center.
+        let arc = Arc2d::from_three_points(DVec([3.0, 0.0]), DVec([0.0, 3.0]), DVec([-3.0, 0.0]))
+            .unwrap();
+        let r = arc.radius();
+        let len = arc.length();
+        let mut results = [DVec([0.0, 0.0]); 3];
+        for i in 0..=10 {
+            let t = len * i as f64 / 10.0;
+            arc.point_with_derivs(t, &mut results).unwrap();
+            let mag = results[2].length();
+            assert!(
+                (mag - 1.0 / r).abs() < 1e-6,
+                "curvature magnitude at t={t}: {mag} != {}",
+                1.0 / r
+            );
+            let inward = (arc.center() - results[0]).normalize();
+            let dot = inward.dot(results[2].normalize());
+            assert!(
+                (dot - 1.0).abs() < 1e-6,
+                "curvature not pointing inward at t={t}: dot={dot}"
+            );
+        }
+    }
+
+    #[test]
+    fn t_2d_point_with_derivs_out_of_domain() {
+        let arc = Arc2d::from_three_points(DVec([1.0, 0.0]), DVec([0.0, 1.0]), DVec([-1.0, 0.0]))
+            .unwrap();
+        let mut results = [DVec([0.0, 0.0]); 2];
+        assert!(arc.point_with_derivs(-1.0, &mut results).is_err());
+        assert!(
+            arc.point_with_derivs(arc.length() + 1.0, &mut results)
+                .is_err()
+        );
+        assert!(arc.point_with_derivs(-1.0, &mut []).is_ok());
+    }
+
+    #[test]
+    fn t_2d_point_with_derivs_point_only() {
+        let arc = Arc2d::from_three_points(DVec([1.0, 0.0]), DVec([0.0, 1.0]), DVec([-1.0, 0.0]))
+            .unwrap();
+        let mut results = [DVec([0.0, 0.0]); 1];
+        arc.point_with_derivs(0.0, &mut results).unwrap();
+        assert!((results[0] - arc.point(0.0).unwrap()).length() < 1e-12);
+    }
+
+    #[test]
+    fn t_2d_point_with_derivs_higher_derivs_zero() {
+        let arc = Arc2d::from_three_points(DVec([1.0, 0.0]), DVec([0.0, 1.0]), DVec([-1.0, 0.0]))
+            .unwrap();
+        let mut results = [DVec([1.0, 1.0]); 5];
+        arc.point_with_derivs(arc.length() / 2.0, &mut results)
+            .unwrap();
+        for (i, r) in results[3..].iter().enumerate() {
+            assert_eq!(*r, DVec([0.0, 0.0]), "results[{}] not zero", i + 3);
+        }
+    }
+
+    #[test]
+    fn t_2d_start_tangent_end_semicircle() {
+        let arc =
+            Arc2d::from_start_tangent_end(DVec([1.0, 0.0]), DVec([0.0, 1.0]), DVec([-1.0, 0.0]))
+                .unwrap();
+        assert!((arc.radius() - 1.0).abs() < 1e-6);
+        assert!((arc.length() - PI).abs() < 1e-6);
+        let mid = arc.point(arc.length() / 2.0).unwrap();
+        assert!(mid[0].abs() < 1e-6);
+        assert!((mid[1] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn t_2d_start_tangent_end_collinear_fails() {
+        assert!(
+            Arc2d::from_start_tangent_end(DVec([0.0, 0.0]), DVec([1.0, 0.0]), DVec([2.0, 0.0]),)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn t_2d_start_tangent_end_coincident_fails() {
+        assert!(
+            Arc2d::from_start_tangent_end(DVec([1.0, 0.0]), DVec([0.0, 1.0]), DVec([1.0, 0.0]),)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn t_2d_start_tangent_end_matches_from_three_points() {
+        // Build from three points, extract start tangent, reconstruct, compare.
+        let arc1 = Arc2d::from_three_points(DVec([2.0, 0.0]), DVec([0.0, 2.0]), DVec([-2.0, 0.0]))
+            .unwrap();
+        let tan = arc1.tangent(0.0).unwrap();
+        let arc2 = Arc2d::from_start_tangent_end(DVec([2.0, 0.0]), tan, DVec([-2.0, 0.0])).unwrap();
+        assert!((arc1.radius() - arc2.radius()).abs() < 1e-6);
+        assert!((arc1.length() - arc2.length()).abs() < 1e-6);
+        assert!((arc1.center() - arc2.center()).length() < 1e-6);
     }
 }

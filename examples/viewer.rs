@@ -1,6 +1,6 @@
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3, Vec4Swizzles};
-use loke::{self, Adaptor, CrossProductAdaptor, ScalarAdaptor, TrigonometryAdaptor};
+use loke::{self, Adaptor, ScalarAdaptor, TrigonometryAdaptor};
 use std::{marker::PhantomData, ops::Range};
 
 // ---------- Glam adaptor ----------
@@ -85,13 +85,6 @@ impl TrigonometryAdaptor for GlamAdaptor {
     }
 }
 
-impl CrossProductAdaptor<3> for GlamAdaptor {
-    #[inline(always)]
-    fn cross(a: &Self::Vector, b: &Self::Vector) -> Self::Vector {
-        a.cross(*b)
-    }
-}
-
 impl Adaptor<3> for GlamAdaptor {
     type Vector = Vec3;
     type Scalar = f32;
@@ -105,17 +98,17 @@ impl Adaptor<3> for GlamAdaptor {
         Vec3::new(coords[0], coords[1], coords[2])
     }
     #[inline(always)]
-    fn vector_coord(v: &Vec3, i: usize) -> f32 {
+    fn vector_coord(v: Vec3, i: usize) -> f32 {
         v[i]
     }
 
     #[inline(always)]
-    fn vector_length(v: &Vec3) -> f32 {
+    fn vector_length(v: Vec3) -> f32 {
         v.length()
     }
 
     #[inline(always)]
-    fn vector_length_sq(v: &Self::Vector) -> Self::Scalar {
+    fn vector_length_sq(v: Self::Vector) -> Self::Scalar {
         v.length_squared()
     }
 
@@ -125,12 +118,12 @@ impl Adaptor<3> for GlamAdaptor {
     }
 
     #[inline(always)]
-    fn dot_product(a: &Self::Vector, b: &Self::Vector) -> Self::Scalar {
-        a.dot(*b)
+    fn dot_product(a: Self::Vector, b: Self::Vector) -> Self::Scalar {
+        a.dot(b)
     }
 
     #[inline(always)]
-    fn coord_arr(v: &Self::Vector) -> [Self::Scalar; 3] {
+    fn coord_arr(v: Self::Vector) -> [Self::Scalar; 3] {
         [v.x, v.y, v.z]
     }
 }
@@ -1240,10 +1233,18 @@ impl Scene for CurveScene {
             Vec3::new(0.5, -2.0, 1.0),
             Vec3::new(2.0, 2.0, 0.0),
             Vec3::new(3.5, 0.0, 0.0),
-            // Arc points.
+            // Arc - three points.
             Vec3::new(-3.5, 0.0, 0.0), // start
             Vec3::new(-3.0, 1.5, 0.0), // middle
             Vec3::new(-2.5, 0.0, 0.0), // end
+            // Arc - start-tangent-end.
+            Vec3::new(3.5, 0.0, 0.0),  // start
+            Vec3::new(3.6, 0.25, 0.0), // tangent-point
+            Vec3::new(5.5, 0.0, 0.0),  // end
+            // Arc - center-normal-start-angle
+            Vec3::new(7.0, 0.0, 0.0), // axis-start
+            Vec3::new(8.0, 0.0, 0.0), // axis-end
+            Vec3::new(7.0, 3.0, 0.0), // arc-start
         ])
     }
 
@@ -1266,6 +1267,18 @@ impl Scene for CurveScene {
         arcs.clear();
         if let Ok(arc) = Arc::from_three_points(inputs[5], inputs[6], inputs[7]) {
             arcs.push(arc);
+        }
+        match Arc::from_start_tangent_end(inputs[8], inputs[9] - inputs[8], inputs[10]) {
+            Ok(arc) => arcs.push(arc),
+            Err(e) => eprintln!("{e:?}"),
+        }
+        match Arc::from_axis_start_angle(
+            (inputs[11], inputs[12]),
+            inputs[13],
+            std::f32::consts::FRAC_PI_2,
+        ) {
+            Ok(arc) => arcs.push(arc),
+            Err(e) => eprintln!("Arc creation failed: {e:?}"),
         }
     }
 }
