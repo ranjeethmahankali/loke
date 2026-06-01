@@ -241,7 +241,7 @@ where
     }
 
     pub fn adaptive_samples(&self, tolerance: A::Scalar) -> impl Iterator<Item = A::Vector> {
-        SplineAdaptiveSamples::new(self, tolerance).map(|SplineSample { point, .. }| point)
+        SplineAdaptiveSamples::new(self, tolerance).map(|AdaptiveSample { point, .. }| point)
     }
 
     pub fn length(&self, tolerance: A::Scalar) -> A::Scalar {
@@ -252,22 +252,28 @@ where
         };
         samples
             .fold((first, A::scalar(0.0)), |(prev, total), s| {
-                let chord = A::vector_length(s.point - prev.point);
-                // Sagitta (midpoint deviation) from the curvature at the previous sample:
-                // h ≈ |C''(t)| * Δt² / 8
-                let h: A::Scalar =
-                    A::sqrt(prev.curvature_magnitude_sq) * prev.param_step * prev.param_step
-                        / A::scalar(8.0);
-                // Taylor expansion of circular arc length given chord c and sagitta h:
-                // arc ≈ c + 8h²/(3c)
-                let arc = if chord > A::scalar(0.0) {
-                    chord + A::scalar(8.0) * h * h / (A::scalar(3.0) * chord)
-                } else {
-                    A::scalar(0.0)
-                };
-                (s, total + arc)
+                let pt = s.point;
+                (
+                    s,
+                    total
+                        + curvature_adjusted_arc_length::<DIM, A>(
+                            prev.point,
+                            pt,
+                            prev.curvature_magnitude_sq,
+                            prev.param_step,
+                        ),
+                )
             })
             .1
+    }
+
+    pub fn uniform_samples(
+        &self,
+        start: A::Scalar,
+        step: A::Scalar,
+        tolerance: A::Scalar,
+    ) -> impl Iterator<Item = A::Vector> {
+        SplineUniformSamples::new(self, start, step, tolerance).map(|s| s.point)
     }
 
     pub fn reversed(mut self) -> Self {
@@ -318,6 +324,39 @@ where
         let n_coeff = self.degree() + 1;
         let offset = (n_coeff * n_segs * coord) + (n_coeff * segment);
         &self.power_basis_coeff[offset..(offset + n_coeff)]
+    }
+}
+
+fn curvature_adjusted_arc_length<const DIM: usize, A: Adaptor<DIM>>(
+    prev_pt: A::Vector,
+    next_pt: A::Vector,
+    curv_mag2: A::Scalar,
+    param_delta: A::Scalar,
+) -> A::Scalar {
+    let mut len = A::vector_length(next_pt - prev_pt); // Chord length
+    if len > A::scalar(0.0) {
+        // Sagitta (midpoint deviation) from the curvature at the previous sample: h ≈ |C''(t)| * Δt² / 8
+        // Taylor expansion of circular arc length given chord c and sagitta h: arc ≈ c + 8h²/(3c)
+        let h: A::Scalar = A::sqrt(curv_mag2) * param_delta * param_delta / A::scalar(8.0);
+        len += A::scalar(8.0) * h * h / (A::scalar(3.0) * len);
+    }
+    len
+}
+
+fn power_basis_param_to_spline_basis<A: ScalarAdaptor>(
+    local_param: A::Float,
+    segment_index: usize,
+    unique_knots: &[A::Float],
+) -> Option<A::Float> {
+    if let (Some(left), Some(right)) = (
+        unique_knots.get(segment_index),
+        unique_knots.get(segment_index + 1),
+    ) && local_param >= A::scalar(0.0)
+        && local_param <= A::scalar(1.0)
+    {
+        Some(*left * (A::scalar(1.0) - local_param) + *right * local_param)
+    } else {
+        None
     }
 }
 
@@ -372,14 +411,21 @@ impl<'a, const DIM: usize, A: Adaptor<DIM>> SplineAdaptiveSamples<'a, DIM, A> {
     }
 }
 
-struct SplineSample<const DIM: usize, A: Adaptor<DIM>> {
+struct AdaptiveSample<const DIM: usize, A: Adaptor<DIM>> {
     point: A::Vector,
+    local_param: A::Scalar,
+    segment_index: usize,
     param_step: A::Scalar,
     curvature_magnitude_sq: A::Scalar,
 }
 
+struct SplineSample<const DIM: usize, A: Adaptor<DIM>> {
+    point: A::Vector,
+    param: A::Scalar,
+}
+
 impl<'a, const DIM: usize, A: Adaptor<DIM>> Iterator for SplineAdaptiveSamples<'a, DIM, A> {
-    type Item = SplineSample<DIM, A>;
+    type Item = AdaptiveSample<DIM, A>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.segment_index >= self.n_segments {
@@ -392,6 +438,8 @@ impl<'a, const DIM: usize, A: Adaptor<DIM>> Iterator for SplineAdaptiveSamples<'
                 self.param,
             )
         });
+        let out_local_param = self.param;
+        let out_segment_idx = self.segment_index;
         // Try to advance.
         if self.param == A::scalar(1.0) {
             self.segment_index += 1;
@@ -420,11 +468,158 @@ impl<'a, const DIM: usize, A: Adaptor<DIM>> Iterator for SplineAdaptiveSamples<'
         if self.param > A::scalar(1.0) {
             self.param = A::scalar(1.0);
         }
-        Some(SplineSample {
+        Some(AdaptiveSample {
             point: A::vector(coords),
+            local_param: out_local_param,
+            segment_index: out_segment_idx,
             param_step: step,
             curvature_magnitude_sq: cmag2,
         })
+    }
+}
+
+struct SplineUniformSamples<'a, const DIM: usize, A: Adaptor<DIM>> {
+    finished: bool,
+    sampler: SplineAdaptiveSamples<'a, DIM, A>,
+    tprev: A::Scalar,
+    tnext: A::Scalar,
+    prev: AdaptiveSample<DIM, A>,
+    next: AdaptiveSample<DIM, A>,
+    dist: A::Scalar,
+    step: A::Scalar,
+    lspan: A::Scalar,
+}
+
+impl<'a, const DIM: usize, A: Adaptor<DIM>> SplineUniformSamples<'a, DIM, A> {
+    pub fn new(
+        curve: &'a Spline<DIM, A>,
+        start: A::Scalar,
+        step: A::Scalar,
+        tolerance: A::Scalar,
+    ) -> Self {
+        let mut sampler = SplineAdaptiveSamples::new(curve, tolerance);
+        let (tprev, tnext, prev, next) = match (sampler.next(), sampler.next()) {
+            (Some(p), Some(n)) => {
+                match (
+                    power_basis_param_to_spline_basis::<A>(
+                        p.local_param,
+                        p.segment_index,
+                        &curve.unique_knots,
+                    ),
+                    power_basis_param_to_spline_basis::<A>(
+                        n.local_param,
+                        n.segment_index,
+                        &curve.unique_knots,
+                    ),
+                ) {
+                    (Some(tprev), Some(tnext)) => (tprev, tnext, p, n),
+                    _ => return Self::empty(sampler),
+                }
+            }
+            _ => {
+                return Self::empty(sampler);
+            }
+        };
+        let lspan = curvature_adjusted_arc_length::<DIM, A>(
+            prev.point,
+            next.point,
+            prev.curvature_magnitude_sq,
+            prev.param_step,
+        );
+        Self {
+            finished: false,
+            sampler,
+            tprev,
+            tnext,
+            prev,
+            next,
+            dist: start,
+            step,
+            lspan,
+        }
+    }
+
+    pub fn empty(sampler: SplineAdaptiveSamples<'a, DIM, A>) -> Self {
+        Self {
+            finished: true,
+            sampler,
+            tprev: A::scalar(0.0),
+            tnext: A::scalar(0.0),
+            prev: AdaptiveSample {
+                point: A::zero_vector(),
+                local_param: A::scalar(0.0),
+                segment_index: 0,
+                param_step: A::scalar(0.0),
+                curvature_magnitude_sq: A::scalar(0.0),
+            },
+            next: AdaptiveSample {
+                point: A::zero_vector(),
+                local_param: A::scalar(0.0),
+                segment_index: 0,
+                param_step: A::scalar(0.0),
+                curvature_magnitude_sq: A::scalar(0.0),
+            },
+            dist: A::scalar(0.0),
+            step: A::scalar(0.0),
+            lspan: A::scalar(0.0),
+        }
+    }
+}
+
+impl<'a, const DIM: usize, A: Adaptor<DIM>> Iterator for SplineUniformSamples<'a, DIM, A> {
+    type Item = SplineSample<DIM, A>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished {
+            return None;
+        }
+        while self.lspan <= A::scalar(0.0) || self.dist > self.lspan {
+            self.dist -= self.lspan;
+            self.prev = std::mem::replace(
+                &mut self.next,
+                match self.sampler.next() {
+                    Some(s) => s,
+                    None => {
+                        self.finished = true;
+                        return None;
+                    }
+                },
+            );
+            self.tprev = std::mem::replace(
+                &mut self.tnext,
+                match power_basis_param_to_spline_basis::<A>(
+                    self.next.local_param,
+                    self.next.segment_index,
+                    &self.sampler.curve.unique_knots,
+                ) {
+                    Some(tnext) => tnext,
+                    None => {
+                        self.finished = true;
+                        return None;
+                    }
+                },
+            );
+            self.lspan = curvature_adjusted_arc_length::<DIM, A>(
+                self.prev.point,
+                self.next.point,
+                self.prev.curvature_magnitude_sq,
+                self.prev.param_step,
+            );
+        }
+        let t = A::clamp(
+            (self.dist * self.tnext + (self.lspan - self.dist) * self.tprev) / self.lspan,
+            self.tprev,
+            self.tnext,
+        );
+        self.dist += self.step;
+        let point = match self.sampler.curve.point(t) {
+            Some(pt) => pt,
+            None => {
+                self.finished = true;
+                return None;
+            }
+        };
+        Some(SplineSample { point, param: t })
     }
 }
 
@@ -840,20 +1035,18 @@ mod test {
     use crate::{DVec, DVec3, polynomial};
     use rand::{RngExt, SeedableRng, rngs::StdRng};
 
-    type S = Spline3d;
-
     // -- Helpers -----------------------------------------------------------
 
     fn vec3(x: f64, y: f64, z: f64) -> DVec3 {
         DVec([x, y, z])
     }
 
-    fn make(cps: &[DVec3], knots: &[f64], degree: usize) -> S {
-        S::create(cps, knots, degree).unwrap()
+    fn make(cps: &[DVec3], knots: &[f64], degree: usize) -> Spline3d {
+        Spline3d::create(cps, knots, degree).unwrap()
     }
 
-    fn make_clamped(cps: &[DVec3], degree: usize) -> S {
-        S::create_clamped(cps, degree).unwrap()
+    fn make_clamped(cps: &[DVec3], degree: usize) -> Spline3d {
+        Spline3d::create_clamped(cps, degree).unwrap()
     }
 
     // ======================================================================
@@ -927,13 +1120,13 @@ mod test {
     #[test]
     fn t_create_validates_knot_count() {
         let cps = [vec3(0., 0., 0.), vec3(1., 0., 0.), vec3(2., 0., 0.)];
-        assert!(S::create(&cps, &[0.0, 0.0, 0.0, 1.0, 1.0, 1.0], 2).is_ok());
+        assert!(Spline3d::create(&cps, &[0.0, 0.0, 0.0, 1.0, 1.0, 1.0], 2).is_ok());
         assert!(matches!(
-            S::create(&cps, &[0.0, 0.0, 0.0, 1.0, 1.0], 2),
+            Spline3d::create(&cps, &[0.0, 0.0, 0.0, 1.0, 1.0], 2),
             Err(Error::IncorrectKnotCount)
         ));
         assert!(matches!(
-            S::create(&cps, &[0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0], 2),
+            Spline3d::create(&cps, &[0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0], 2),
             Err(Error::IncorrectKnotCount)
         ));
     }
@@ -941,11 +1134,11 @@ mod test {
     #[test]
     fn t_create_clamped_validates_control_points() {
         assert!(matches!(
-            S::create_clamped(&[vec3(0., 0., 0.), vec3(1., 0., 0.)], 2),
+            Spline3d::create_clamped(&[vec3(0., 0., 0.), vec3(1., 0., 0.)], 2),
             Err(Error::InsufficientControlPoints)
         ));
         assert!(matches!(
-            S::create_clamped(Vec::<DVec3>::new(), 0),
+            Spline3d::create_clamped(Vec::<DVec3>::new(), 0),
             Err(Error::InsufficientControlPoints)
         ));
         let spline = make_clamped(&[vec3(0., 0., 0.), vec3(1., 2., 0.), vec3(2., 0., 0.)], 2);
@@ -1318,7 +1511,7 @@ mod test {
         work[0]
     }
 
-    fn check_bezier_decomposition(spline: &S) {
+    fn check_bezier_decomposition(spline: &Spline3d) {
         let mut bezier_cps = Vec::new();
         piecewise_bezier::<3, F64Adaptor>(&spline.knots, &spline.control_points, &mut bezier_cps);
         let p = spline.degree();
@@ -1525,7 +1718,7 @@ mod test {
         assert_eq!(dst.len(), 2);
     }
 
-    fn check_power_basis(spline: &S) {
+    fn check_power_basis(spline: &Spline3d) {
         let unique = &spline.unique_knots;
         let n_segments = unique.len() - 1;
         let p = spline.degree();
@@ -1673,7 +1866,7 @@ mod test {
         ));
     }
 
-    fn verify_bounds(spline: &S, n_samples: usize) {
+    fn verify_bounds(spline: &Spline3d, n_samples: usize) {
         let (bmin, bmax) = spline.bounds();
         let b_lo = bmin.0;
         let b_hi = bmax.0;
@@ -1815,7 +2008,7 @@ mod test {
         verify_bounds(&spline, 10000);
     }
 
-    fn verify_reversed(spline: &S, n_samples: usize) {
+    fn verify_reversed(spline: &Spline3d, n_samples: usize) {
         let (lo, hi) = spline.domain();
         let ksum = lo + hi;
         let rev = spline.clone().reversed();
@@ -2112,6 +2305,216 @@ mod test {
             (len_fwd - len_rev).abs() < 1e-6,
             "Forward {len_fwd} != reversed {len_rev}"
         );
+    }
+
+    // ======================================================================
+    // uniform_walk tests
+    // ======================================================================
+
+    #[test]
+    fn t_uniform_walk_straight_line() {
+        // 3-4-5 right-triangle polyline: three legs of lengths 3, 4, 5 → total 12.
+        // For a piecewise-linear spline the uniform walk is exact (no curvature correction
+        // needed), so we can verify positions to floating-point precision.
+        let spline = make_clamped(
+            &[
+                vec3(0., 0., 0.),
+                vec3(3., 0., 0.),
+                vec3(3., 4., 0.),
+                vec3(-2., 4., 0.),
+            ],
+            1,
+        );
+        // start=0, step=1 → 13 points at arc-distances 0, 1, …, 12.
+        let pts: Vec<_> = spline.uniform_samples(0.0, 1.0, 1e-6).collect();
+        let expected = [
+            vec3(0., 0., 0.),
+            vec3(1., 0., 0.),
+            vec3(2., 0., 0.),
+            vec3(3., 0., 0.),
+            vec3(3., 1., 0.),
+            vec3(3., 2., 0.),
+            vec3(3., 3., 0.),
+            vec3(3., 4., 0.),
+            vec3(2., 4., 0.),
+            vec3(1., 4., 0.),
+            vec3(0., 4., 0.),
+            vec3(-1., 4., 0.),
+            vec3(-2., 4., 0.),
+        ];
+        assert_eq!(
+            pts.len(),
+            expected.len(),
+            "expected {} points",
+            expected.len()
+        );
+        for (i, (pt, exp)) in pts.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (*pt - *exp).length() < 1e-9,
+                "pt[{i}]: expected {exp:?}, got {pt:?}"
+            );
+        }
+        // start=0.5, step=1 → 12 points at arc-distances 0.5, 1.5, …, 11.5.
+        let pts: Vec<_> = spline.uniform_samples(0.5, 1.0, 1e-6).collect();
+        assert_eq!(pts.len(), 12, "expected 12 points with offset start");
+        dbg!(&pts);
+        let expected = [
+            vec3(0.5, 0.0, 0.0),
+            vec3(1.5, 0.0, 0.0),
+            vec3(2.5, 0.0, 0.0),
+            vec3(3.0, 0.5, 0.0),
+            vec3(3.0, 1.5, 0.0),
+            vec3(3.0, 2.5, 0.0),
+            vec3(3.0, 3.5, 0.0),
+            vec3(2.5, 4.0, 0.0),
+            vec3(1.5, 4.0, 0.0),
+            vec3(0.5, 4.0, 0.0),
+            vec3(-0.5, 4.0, 0.0),
+            vec3(-1.5, 4.0, 0.0),
+        ];
+        assert_eq!(
+            pts.len(),
+            expected.len(),
+            "expected {} points",
+            expected.len()
+        );
+        for (i, (pt, exp)) in pts.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (*pt - *exp).length() < 1e-9,
+                "pt[{i}]: expected {exp:?}, got {pt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn t_uniform_walk_zero_length_segment() {
+        // Degree-1 spline where the middle segment has zero length (two consecutive
+        // identical control points). This exercises the lspan == 0 guard.
+        // Segments: (0,0,0)→(1,0,0) [len=1], (1,0,0)→(1,0,0) [len=0], (1,0,0)→(2,0,0) [len=1].
+        // Expected: same as a simple 2-unit line — the zero-length segment is skipped.
+        let spline = make_clamped(
+            &[
+                vec3(0., 0., 0.),
+                vec3(1., 0., 0.),
+                vec3(1., 0., 0.),
+                vec3(2., 0., 0.),
+            ],
+            1,
+        );
+        let pts: Vec<_> = spline.uniform_samples(0.0, 0.5, 1e-6).collect();
+        let expected = [
+            vec3(0., 0., 0.),
+            vec3(0.5, 0., 0.),
+            vec3(1., 0., 0.),
+            vec3(1.5, 0., 0.),
+            vec3(2., 0., 0.),
+        ];
+        assert_eq!(pts.len(), expected.len(), "wrong point count");
+        for (i, (pt, exp)) in pts.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (*pt - *exp).length() < 1e-9,
+                "pt[{i}]: expected {exp:?}, got {pt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn t_uniform_walk_curved_uniformity() {
+        // Quadratic Bezier: (0,0,0)→(0.5,1,0)→(1,0,0).  Arc length ≈ 1.479.
+        // Verify that consecutive walk points are approximately equidistant in arc
+        // length, and that the number of points is consistent with curve length.
+        let spline = make(
+            &[vec3(0., 0., 0.), vec3(0.5, 1., 0.), vec3(1., 0., 0.)],
+            &[0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            2,
+        );
+        let total_len = spline.length(1e-6);
+        let step = 0.1_f64;
+        let pts: Vec<_> = spline.uniform_samples(0.0, step, 1e-6).collect();
+        // Point count must satisfy (n-1)*step ≤ total_len < n*step.
+        let n = pts.len() as f64;
+        assert!(
+            (n - 1.0) * step <= total_len + 1e-9,
+            "too many points: {n} for length {total_len:.4}"
+        );
+        assert!(
+            n * step > total_len - 1e-9,
+            "too few points: {n} for length {total_len:.4}"
+        );
+        // Consecutive chord distances must be nearly equal (arc-length uniformity).
+        let dists: Vec<f64> = pts.windows(2).map(|w| (w[1] - w[0]).length()).collect();
+        let max_d = dists.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let min_d = dists.iter().cloned().fold(f64::INFINITY, f64::min);
+        assert!(
+            max_d / min_d < 1.05,
+            "spacing non-uniform: min={min_d:.5}, max={max_d:.5}"
+        );
+        // All chord distances should be close to step in magnitude.
+        assert!(
+            max_d < step * 1.02,
+            "chord distance {max_d:.5} exceeds step {step}"
+        );
+        // Finer tolerance produces more uniform spacing (convergence check).
+        let pts_fine: Vec<_> = spline.uniform_samples(0.0, step / 2.0, 1e-6).collect();
+        let dists_fine: Vec<f64> = pts_fine
+            .windows(2)
+            .map(|w| (w[1] - w[0]).length())
+            .collect();
+        let max_fine = dists_fine.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let min_fine = dists_fine.iter().cloned().fold(f64::INFINITY, f64::min);
+        assert!(
+            max_fine / min_fine <= max_d / min_d + 1e-9,
+            "finer step should be at least as uniform: coarse ratio {:.5}, fine ratio {:.5}",
+            max_d / min_d,
+            max_fine / min_fine
+        );
+    }
+
+    #[test]
+    fn t_uniform_walk_edge_cases() {
+        // Zero-length curve → no points emitted.
+        let zero = make_clamped(&[vec3(1., 2., 3.), vec3(1., 2., 3.)], 1);
+        assert_eq!(
+            zero.uniform_samples(0.0, 0.5, 1e-6).count(),
+            0,
+            "zero-length curve should yield 0 points"
+        );
+
+        let line = make_clamped(&[vec3(0., 0., 0.), vec3(5., 0., 0.)], 1);
+
+        // start beyond total length → no points.
+        assert_eq!(
+            line.uniform_samples(6.0, 1.0, 1e-6).count(),
+            0,
+            "start past end should yield 0 points"
+        );
+
+        // step larger than total length → exactly one point (the start).
+        let pts: Vec<_> = line.uniform_samples(0.0, 100.0, 1e-6).collect();
+        assert_eq!(pts.len(), 1, "oversized step should yield 1 point");
+        assert!((pts[0] - vec3(0., 0., 0.)).length() < 1e-9);
+
+        // step equals total length → exactly two points (start and end).
+        let pts2: Vec<_> = line.uniform_samples(0.0, 5.0, 1e-6).collect();
+        assert_eq!(pts2.len(), 2, "step==length should yield 2 points");
+        assert!((pts2[0] - vec3(0., 0., 0.)).length() < 1e-9);
+        assert!((pts2[1] - vec3(5., 0., 0.)).length() < 1e-9);
+
+        // Multi-segment cubic: uniform_walk output matches length() estimate.
+        let cubic = make_clamped(
+            &[
+                vec3(0., 0., 0.),
+                vec3(1., 2., -1.),
+                vec3(2., -1., 3.),
+                vec3(3., 0., 0.),
+            ],
+            3,
+        );
+        let total = cubic.length(1e-6);
+        let step = total / 7.0;
+        let n = cubic.uniform_samples(0.0, step, 1e-6).count() as f64;
+        assert!((n - 1.0) * step <= total + 1e-6, "too many points: {n}");
+        assert!(n * step > total - 1e-6, "too few points: {n}");
     }
 
     #[test]

@@ -245,26 +245,62 @@ where
         };
         let nf = A::scalar(n as f64);
         let inv_sin = A::scalar(1.0) / A::sin(half_angle);
+        let zero = A::scalar(0.0);
+        let one = A::scalar(1.0);
         std::iter::once([A::scalar(1.0), A::scalar(0.0), A::scalar(0.0)])
             .chain((1..=n).map(move |i| {
                 let coeff = slerp_raw_no_adjust::<A>(half_angle, A::scalar(i as f64) / nf);
-                [inv_sin * coeff[0], inv_sin * coeff[1], A::scalar(0.0)]
+                [inv_sin * coeff[0], inv_sin * coeff[1], zero]
             }))
             .chain((1..n).map(move |i| {
                 let coeff = slerp_raw_no_adjust::<A>(half_angle, A::scalar(i as f64) / nf);
-                [A::scalar(0.0), inv_sin * coeff[0], inv_sin * coeff[1]]
+                [zero, inv_sin * coeff[0], inv_sin * coeff[1]]
             }))
-            .chain(std::iter::once([
-                A::scalar(0.0),
-                A::scalar(0.0),
-                A::scalar(1.0),
-            ]))
+            .chain(std::iter::once([zero, zero, one]))
             .map(|coeff| {
                 self.center
                     + self.start_dir * coeff[0] * self.radius
                     + self.mid_dir * coeff[1] * self.radius
                     + self.end_dir * coeff[2] * self.radius
             })
+    }
+
+    pub fn uniform_samples(
+        &self,
+        start: A::Scalar,
+        step: A::Scalar,
+        _tolerance: A::Scalar,
+    ) -> impl Iterator<Item = A::Vector>
+    where
+        A: TrigonometryAdaptor,
+    {
+        let zero = A::scalar(0.0);
+        let one = A::scalar(1.0);
+        let half_angle = A::scalar(0.5) * self.angle;
+        let inv_sin = A::scalar(1.0) / A::sin(half_angle);
+        let two = A::scalar(2.0);
+        let ang_step = step / self.radius;
+        let mut t = A::max((start / self.radius) / half_angle, zero);
+        let step = ang_step / half_angle;
+        std::iter::from_fn(move || {
+            if t <= one {
+                let coeff = slerp_raw_no_adjust::<A>(half_angle, t);
+                t += step;
+                Some([inv_sin * coeff[0], inv_sin * coeff[1], zero])
+            } else if t > one && t <= two {
+                let coeff = slerp_raw_no_adjust::<A>(half_angle, t - one);
+                t += step;
+                Some([zero, inv_sin * coeff[0], inv_sin * coeff[1]])
+            } else {
+                None
+            }
+        })
+        .map(|coeff| {
+            self.center
+                + self.start_dir * coeff[0] * self.radius
+                + self.mid_dir * coeff[1] * self.radius
+                + self.end_dir * coeff[2] * self.radius
+        })
     }
 
     /// Compute the axis-aligned bounding box of the arc.
@@ -2082,6 +2118,120 @@ mod test {
         let mid = arc.point(arc.length() / 2.0).unwrap();
         assert!(mid[0].abs() < 1e-6);
         assert!((mid[1] - 1.0).abs() < 1e-6);
+    }
+
+    // ======================================================================
+    // uniform_samples tests
+    // ======================================================================
+
+    // Helper: collect uniform_samples and assert each point matches arc.point(start + i*step).
+    fn check_uniform_samples(arc: &Arc3d, start: f64, step: f64, expected_count: usize) {
+        let pts: Vec<_> = arc.uniform_samples(start, step, 1e-6).collect();
+        assert_eq!(
+            pts.len(),
+            expected_count,
+            "expected {expected_count} points, got {}",
+            pts.len()
+        );
+        for (i, &pt) in pts.iter().enumerate() {
+            let u = start + i as f64 * step;
+            let expected = arc.point(u).unwrap();
+            assert!(
+                (pt - expected).length() < 1e-9,
+                "pt[{i}] at u={u:.6}: got {pt:?}, expected {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn t_uniform_samples_minor_arc() {
+        // Quarter circle (1,0,0) → (√2/2,√2/2,0) → (0,1,0); radius=1, angle=π/2, len=π/2.
+        let arc = Arc3d::from_three_points(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([FRAC_1_SQRT_2, FRAC_1_SQRT_2, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+        )
+        .unwrap();
+        let len = arc.length();
+        // step = len/4 → 5 points at u = 0, len/4, len/2, 3len/4, len.
+        check_uniform_samples(&arc, 0.0, len / 4.0, 5);
+        // Endpoints match arc.start() and arc.end() exactly.
+        let pts: Vec<_> = arc.uniform_samples(0.0, len / 4.0, 1e-6).collect();
+        assert!((pts[0] - arc.start()).length() < 1e-9, "first point not at start");
+        assert!((pts[4] - arc.end()).length() < 1e-9, "last point not at end");
+        // Non-zero start offset: start=len/4, step=len/4 → 4 points.
+        check_uniform_samples(&arc, len / 4.0, len / 4.0, 4);
+    }
+
+    #[test]
+    fn t_uniform_samples_major_arc() {
+        // Major arc (5π/3 ≈ 300°): (1,0,0) → (0,-1,0) → (0.5, √3/2, 0); radius=1.
+        let arc = Arc3d::from_three_points(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([0.0, -1.0, 0.0]),
+            DVec([0.5, 3f64.sqrt() / 2.0, 0.0]),
+        )
+        .unwrap();
+        assert!(arc.angle() > PI, "expected major arc");
+        let len = arc.length();
+        // step = len/6 → 7 points (6 equal steps covering the full arc).
+        check_uniform_samples(&arc, 0.0, len / 6.0, 7);
+        // Endpoints.
+        let pts: Vec<_> = arc.uniform_samples(0.0, len / 6.0, 1e-6).collect();
+        assert!((pts[0] - arc.start()).length() < 1e-9, "first point not at start");
+        assert!((pts[6] - arc.end()).length() < 1e-9, "last point not at end");
+        // Start offset splits the arc differently.
+        check_uniform_samples(&arc, len / 6.0, len / 6.0, 6);
+    }
+
+    #[test]
+    fn t_uniform_samples_semicircle() {
+        // Semicircle (angle = π, boundary between minor and major).
+        let arc = Arc3d::from_three_points(
+            DVec([-1.0, 0.0, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+            DVec([1.0, 0.0, 0.0]),
+        )
+        .unwrap();
+        let len = arc.length(); // π
+        // step = len/4 → 5 points; midpoint is at u=len/2.
+        check_uniform_samples(&arc, 0.0, len / 4.0, 5);
+        let pts: Vec<_> = arc.uniform_samples(0.0, len / 4.0, 1e-6).collect();
+        let mid = pts[2];
+        assert!((mid - DVec([0.0, 1.0, 0.0])).length() < 1e-9, "midpoint wrong: {mid:?}");
+    }
+
+    #[test]
+    fn t_uniform_samples_edge_cases() {
+        let arc = Arc3d::from_three_points(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([FRAC_1_SQRT_2, FRAC_1_SQRT_2, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+        )
+        .unwrap();
+        let len = arc.length();
+        // start > len → 0 points.
+        assert_eq!(arc.uniform_samples(len + 0.1, 0.1, 1e-6).count(), 0);
+        // start = len → 1 point at the endpoint.
+        let at_end: Vec<_> = arc.uniform_samples(len, 0.1, 1e-6).collect();
+        assert_eq!(at_end.len(), 1);
+        assert!((at_end[0] - arc.end()).length() < 1e-9);
+        // step > len → 1 point at the start.
+        let big_step: Vec<_> = arc.uniform_samples(0.0, len * 2.0, 1e-6).collect();
+        assert_eq!(big_step.len(), 1);
+        assert!((big_step[0] - arc.start()).length() < 1e-9);
+        // step = len → 2 points: start and end.
+        let full_step: Vec<_> = arc.uniform_samples(0.0, len, 1e-6).collect();
+        assert_eq!(full_step.len(), 2);
+        assert!((full_step[0] - arc.start()).length() < 1e-9);
+        assert!((full_step[1] - arc.end()).length() < 1e-9);
+        // Negative start → clamped to 0, same result as start=0.
+        let from_zero: Vec<_> = arc.uniform_samples(0.0, len / 4.0, 1e-6).collect();
+        let from_neg: Vec<_> = arc.uniform_samples(-1.0, len / 4.0, 1e-6).collect();
+        assert_eq!(from_neg.len(), from_zero.len());
+        for (a, b) in from_zero.iter().zip(from_neg.iter()) {
+            assert!((*a - *b).length() < 1e-9);
+        }
     }
 
     #[test]

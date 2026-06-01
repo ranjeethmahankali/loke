@@ -94,6 +94,35 @@ impl<const DIM: usize, A: Adaptor<DIM>> LineSeg<DIM, A> {
         [self.from, self.to].into_iter()
     }
 
+    pub fn uniform_samples(
+        &self,
+        start: A::Scalar,
+        step: A::Scalar,
+        _tolerance: A::Scalar,
+    ) -> impl Iterator<Item = A::Vector> {
+        let len = self.length();
+        let one = A::scalar(1.0);
+        let zero = A::scalar(0.0);
+        let step = if len == zero { zero } else { step / len };
+        let vstep = (self.to - self.from) * step;
+        let mut param = if len == zero {
+            zero
+        } else {
+            A::max(start / len, zero)
+        };
+        let mut pt = param * self.to + (one - param) * self.from;
+        std::iter::from_fn(move || {
+            if param <= one && step > zero {
+                param += step;
+                let out = pt;
+                pt += vstep;
+                Some(out)
+            } else {
+                None
+            }
+        })
+    }
+
     pub fn reversed(&self) -> Self {
         LineSeg {
             from: self.to,
@@ -212,6 +241,63 @@ mod test {
         let (lo, hi) = line.bounds();
         assert_eq!(lo, DVec([1.0, -1.0, -3.0]));
         assert_eq!(hi, DVec([3.0, 2.0, 5.0]));
+    }
+
+    #[test]
+    fn uniform_samples_positions() {
+        let line = LineSeg3d::create(DVec([0.0, 0.0, 0.0]), DVec([10.0, 0.0, 0.0]));
+        // start=0, step=2 → 6 points at x = 0, 2, 4, 6, 8, 10.
+        let pts: Vec<_> = line.uniform_samples(0.0, 2.0, 1e-6).collect();
+        assert_eq!(pts.len(), 6);
+        for (i, pt) in pts.iter().enumerate() {
+            assert!(
+                (*pt - DVec([2.0 * i as f64, 0.0, 0.0])).length() < 1e-12,
+                "pt[{i}] = {pt:?}"
+            );
+        }
+        // start=1, step=2 → 5 points at x = 1, 3, 5, 7, 9.
+        let pts2: Vec<_> = line.uniform_samples(1.0, 2.0, 1e-6).collect();
+        assert_eq!(pts2.len(), 5);
+        for (i, pt) in pts2.iter().enumerate() {
+            assert!(
+                (*pt - DVec([1.0 + 2.0 * i as f64, 0.0, 0.0])).length() < 1e-12,
+                "pt2[{i}] = {pt:?}"
+            );
+        }
+        // Diagonal (0,0,0)→(3,4,0), length=5, step=2.5 → 3 points at start, midpoint, end.
+        let diag = LineSeg3d::create(DVec([0.0, 0.0, 0.0]), DVec([3.0, 4.0, 0.0]));
+        let pts3: Vec<_> = diag.uniform_samples(0.0, 2.5, 1e-6).collect();
+        assert_eq!(pts3.len(), 3);
+        assert!((pts3[0] - DVec([0.0, 0.0, 0.0])).length() < 1e-12);
+        assert!((pts3[1] - DVec([1.5, 2.0, 0.0])).length() < 1e-12);
+        assert!((pts3[2] - DVec([3.0, 4.0, 0.0])).length() < 1e-12);
+    }
+
+    #[test]
+    fn uniform_samples_edge_cases() {
+        let line = LineSeg3d::create(DVec([0.0, 0.0, 0.0]), DVec([5.0, 0.0, 0.0]));
+        // start > len → 0 points.
+        assert_eq!(line.uniform_samples(6.0, 1.0, 1e-6).count(), 0);
+        // start = len → 1 point at the endpoint.
+        let at_end: Vec<_> = line.uniform_samples(5.0, 1.0, 1e-6).collect();
+        assert_eq!(at_end.len(), 1);
+        assert!((at_end[0] - DVec([5.0, 0.0, 0.0])).length() < 1e-12);
+        // step > len → 1 point at the start.
+        let big_step: Vec<_> = line.uniform_samples(0.0, 100.0, 1e-6).collect();
+        assert_eq!(big_step.len(), 1);
+        assert!((big_step[0] - DVec([0.0, 0.0, 0.0])).length() < 1e-12);
+        // step = len → 2 points: start and end.
+        let full_step: Vec<_> = line.uniform_samples(0.0, 5.0, 1e-6).collect();
+        assert_eq!(full_step.len(), 2);
+        assert!((full_step[0] - DVec([0.0, 0.0, 0.0])).length() < 1e-12);
+        assert!((full_step[1] - DVec([5.0, 0.0, 0.0])).length() < 1e-12);
+        // Zero-length line → 0 points regardless of step.
+        let zero = LineSeg3d::create(DVec([3.0, 3.0, 3.0]), DVec([3.0, 3.0, 3.0]));
+        assert_eq!(zero.uniform_samples(0.0, 1.0, 1e-6).count(), 0);
+        // Negative start → clamped to 0, same as start=0.
+        let neg: Vec<_> = line.uniform_samples(-2.0, 5.0, 1e-6).collect();
+        assert_eq!(neg.len(), 2);
+        assert!((neg[0] - DVec([0.0, 0.0, 0.0])).length() < 1e-12);
     }
 
     #[test]
