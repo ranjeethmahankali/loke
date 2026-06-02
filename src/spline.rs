@@ -187,6 +187,13 @@ where
             .map(|()| results[1])
     }
 
+    pub fn curvature(&self, u: A::Scalar) -> Option<A::Vector> {
+        let mut results = [A::zero_vector(); 3];
+        self.point_with_derivs(u, &mut results)
+            .ok()
+            .map(|()| results[2])
+    }
+
     pub fn start(&self) -> A::Vector {
         self.point(self.domain().0)
             .expect("Internal error, can never fail")
@@ -302,6 +309,10 @@ where
         self.power_basis_coeff =
             compute_polynomial_coeff::<DIM, A>(&self.knots, &self.control_points);
         self
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.start() == self.end()
     }
 
     fn power_basis_polynomial(&self, segment: usize, coord: usize) -> &[A::Scalar] {
@@ -421,7 +432,6 @@ struct AdaptiveSample<const DIM: usize, A: Adaptor<DIM>> {
 
 struct SplineSample<const DIM: usize, A: Adaptor<DIM>> {
     point: A::Vector,
-    param: A::Scalar,
 }
 
 impl<'a, const DIM: usize, A: Adaptor<DIM>> Iterator for SplineAdaptiveSamples<'a, DIM, A> {
@@ -619,7 +629,7 @@ impl<'a, const DIM: usize, A: Adaptor<DIM>> Iterator for SplineUniformSamples<'a
                 return None;
             }
         };
-        Some(SplineSample { point, param: t })
+        Some(SplineSample { point })
     }
 }
 
@@ -2697,5 +2707,64 @@ mod test {
                 assert_clamped_basis_exact_at_endpoints(&knots, degree);
             }
         }
+    }
+
+    // ── curvature tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn t_curvature_linear_spline_is_zero() {
+        // Degree-1 spline: all higher-order derivatives are zero.
+        let spline = make_clamped(&[vec3(0., 0., 0.), vec3(3., 4., 0.)], 1);
+        let (lo, hi) = spline.domain();
+        assert_eq!(spline.curvature(lo), Some(vec3(0., 0., 0.)));
+        assert_eq!(spline.curvature((lo + hi) / 2.0), Some(vec3(0., 0., 0.)));
+        assert_eq!(spline.curvature(hi), Some(vec3(0., 0., 0.)));
+        assert!(spline.curvature(lo - 0.001).is_none());
+        assert!(spline.curvature(hi + 0.001).is_none());
+    }
+
+    #[test]
+    fn t_curvature_quadratic_constant_second_derivative() {
+        // Quadratic Bezier with p0=(0,0,0), p1=(0.5,1,0), p2=(1,0,0).
+        // P(t) = (t, 2t-2t², 0), so P''(t) = (0,-4,0) everywhere.
+        let spline = make_clamped(
+            &[vec3(0., 0., 0.), vec3(0.5, 1., 0.), vec3(1., 0., 0.)],
+            2,
+        );
+        let expected = vec3(0., -4., 0.);
+        let (lo, hi) = spline.domain();
+        for i in 0..=4 {
+            let t = lo + (hi - lo) * i as f64 / 4.0;
+            let curv = spline.curvature(t).unwrap();
+            assert!(
+                (curv - expected).length() < 1e-10,
+                "curvature at t={t}: got {curv:?}"
+            );
+        }
+    }
+
+    // ── is_closed tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn t_is_closed() {
+        // Open spline: first and last control points differ.
+        let open = make_clamped(
+            &[vec3(0., 0., 0.), vec3(1., 1., 0.), vec3(2., 0., 0.)],
+            2,
+        );
+        assert!(!open.is_closed());
+
+        // Closed spline: first and last control points are identical.
+        let closed = make_clamped(
+            &[
+                vec3(1., 0., 0.),
+                vec3(0., 1., 0.),
+                vec3(-1., 0., 0.),
+                vec3(0., -1., 0.),
+                vec3(1., 0., 0.),
+            ],
+            3,
+        );
+        assert!(closed.is_closed());
     }
 }

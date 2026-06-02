@@ -3,10 +3,8 @@ use crate::{
     error::Error,
     vec::{F32Adaptor, F64Adaptor},
 };
-use std::f64::{
-    self,
-    consts::{PI, TAU},
-};
+use core::f64;
+use std::f64::consts::{PI, TAU};
 
 pub type Arc2d = Arc<2, F64Adaptor>;
 pub type Arc3d = Arc<3, F64Adaptor>;
@@ -186,6 +184,18 @@ where
         )
     }
 
+    pub fn curvature(&self, t: A::Scalar) -> Option<A::Vector>
+    where
+        A: TrigonometryAdaptor,
+    {
+        match self.point(t) {
+            Some(p) if self.radius > A::epsilon() => {
+                Some((self.center - p) / (self.radius * self.radius))
+            }
+            _ => None,
+        }
+    }
+
     pub fn point_with_derivs(&self, t: A::Scalar, results: &mut [A::Vector]) -> Result<(), Error>
     where
         A: TrigonometryAdaptor,
@@ -330,6 +340,10 @@ where
             mid_dir: self.mid_dir,
             angle: self.angle,
         }
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.start() == self.end()
     }
 }
 
@@ -2157,8 +2171,14 @@ mod test {
         check_uniform_samples(&arc, 0.0, len / 4.0, 5);
         // Endpoints match arc.start() and arc.end() exactly.
         let pts: Vec<_> = arc.uniform_samples(0.0, len / 4.0, 1e-6).collect();
-        assert!((pts[0] - arc.start()).length() < 1e-9, "first point not at start");
-        assert!((pts[4] - arc.end()).length() < 1e-9, "last point not at end");
+        assert!(
+            (pts[0] - arc.start()).length() < 1e-9,
+            "first point not at start"
+        );
+        assert!(
+            (pts[4] - arc.end()).length() < 1e-9,
+            "last point not at end"
+        );
         // Non-zero start offset: start=len/4, step=len/4 → 4 points.
         check_uniform_samples(&arc, len / 4.0, len / 4.0, 4);
     }
@@ -2178,8 +2198,14 @@ mod test {
         check_uniform_samples(&arc, 0.0, len / 6.0, 7);
         // Endpoints.
         let pts: Vec<_> = arc.uniform_samples(0.0, len / 6.0, 1e-6).collect();
-        assert!((pts[0] - arc.start()).length() < 1e-9, "first point not at start");
-        assert!((pts[6] - arc.end()).length() < 1e-9, "last point not at end");
+        assert!(
+            (pts[0] - arc.start()).length() < 1e-9,
+            "first point not at start"
+        );
+        assert!(
+            (pts[6] - arc.end()).length() < 1e-9,
+            "last point not at end"
+        );
         // Start offset splits the arc differently.
         check_uniform_samples(&arc, len / 6.0, len / 6.0, 6);
     }
@@ -2198,7 +2224,10 @@ mod test {
         check_uniform_samples(&arc, 0.0, len / 4.0, 5);
         let pts: Vec<_> = arc.uniform_samples(0.0, len / 4.0, 1e-6).collect();
         let mid = pts[2];
-        assert!((mid - DVec([0.0, 1.0, 0.0])).length() < 1e-9, "midpoint wrong: {mid:?}");
+        assert!(
+            (mid - DVec([0.0, 1.0, 0.0])).length() < 1e-9,
+            "midpoint wrong: {mid:?}"
+        );
     }
 
     #[test]
@@ -2260,5 +2289,71 @@ mod test {
         assert!((arc1.radius() - arc2.radius()).abs() < 1e-6);
         assert!((arc1.length() - arc2.length()).abs() < 1e-6);
         assert!((arc1.center() - arc2.center()).length() < 1e-6);
+    }
+
+    // ── curvature tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn t_curvature_magnitude_and_direction() {
+        // Off-origin center: arc of radius 3 centered at (1, 1, 0).
+        // This specifically exercises the (center - p) / r² formula —
+        // with center at origin the old bug (-p/r) would give wrong magnitude
+        // but not wrong direction, so an off-origin center catches both.
+        let arc = Arc3d::from_three_points(
+            DVec([4.0, 1.0, 0.0]),
+            DVec([1.0, 4.0, 0.0]),
+            DVec([-2.0, 1.0, 0.0]),
+        )
+        .unwrap();
+        let r = arc.radius();
+        let len = arc.length();
+        for i in 0..=6 {
+            let t = len * i as f64 / 6.0;
+            let curv = arc.curvature(t).unwrap();
+            let p = arc.point(t).unwrap();
+            // Magnitude must be 1/r.
+            assert!(
+                (curv.length() - 1.0 / r).abs() < 1e-10,
+                "magnitude at t={t}: got {}, expected {}",
+                curv.length(),
+                1.0 / r
+            );
+            // Must point from the arc point toward the center.
+            let inward = (arc.center() - p).normalize();
+            assert!(
+                (inward.dot(curv.normalize()) - 1.0).abs() < 1e-10,
+                "direction at t={t}"
+            );
+        }
+    }
+
+    #[test]
+    fn t_curvature_out_of_domain() {
+        let arc = Arc2d::from_three_points(DVec([1.0, 0.0]), DVec([0.0, 1.0]), DVec([-1.0, 0.0]))
+            .unwrap();
+        assert!(arc.curvature(-0.001).is_none());
+        assert!(arc.curvature(arc.length() + 0.001).is_none());
+    }
+
+    // ── is_closed tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn t_is_closed() {
+        // Partial arcs are never closed — the constructor rejects full circles.
+        let semicircle = Arc3d::from_three_points(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+            DVec([-1.0, 0.0, 0.0]),
+        )
+        .unwrap();
+        assert!(!semicircle.is_closed());
+
+        let quarter = Arc2d::from_three_points(
+            DVec([1.0, 0.0]),
+            DVec([FRAC_1_SQRT_2, FRAC_1_SQRT_2]),
+            DVec([0.0, 1.0]),
+        )
+        .unwrap();
+        assert!(!quarter.is_closed());
     }
 }

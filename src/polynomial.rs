@@ -311,7 +311,7 @@ fn quadratic_roots_bounded<P: ScalarAdaptor>(
         let r0i = (r0 >= x0 && r0 <= x1) as usize;
         let r1i = (r1 >= x0 && r1 <= x1) as usize;
         roots[0] = r0;
-        roots[r0i as usize] = r1;
+        roots[r0i] = r1;
         r0i + r1i
     } else if delta < P::scalar(0.0) {
         0
@@ -1227,7 +1227,7 @@ mod test {
                 polynomial_roots_in_range::<F64Adaptor>(&coef, &mut roots, x0, x1, DEFAULT_ERROR)
                     .unwrap();
             assert_eq!(
-                n as usize, expected_count,
+                n, expected_count,
                 "known roots {:?}, range [{}, {}], expected {} got {}",
                 known, x0, x1, expected_count, n
             );

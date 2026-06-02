@@ -49,6 +49,15 @@ impl<const DIM: usize, A: Adaptor<DIM>> LineSeg<DIM, A> {
         }
     }
 
+    pub fn curvature(&self, u: A::Scalar) -> Option<A::Vector> {
+        let len = self.length();
+        if u >= A::scalar(0.0) && u <= len {
+            Some(A::zero_vector())
+        } else {
+            None
+        }
+    }
+
     pub fn point_with_derivs(&self, u: A::Scalar, results: &mut [A::Vector]) -> Result<(), Error> {
         if results.is_empty() {
             return Ok(()); // Nothing to evaluate.
@@ -128,6 +137,10 @@ impl<const DIM: usize, A: Adaptor<DIM>> LineSeg<DIM, A> {
             from: self.to,
             to: self.from,
         }
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.from == self.to
     }
 }
 
@@ -330,5 +343,25 @@ mod test {
         assert!((line.length() - expected_len).abs() < 1e-12);
         let mid = line.point(expected_len / 2.0).unwrap();
         assert!((mid - DVec([0.5, 0.5, 0.5])).length() < 1e-12);
+    }
+
+    #[test]
+    fn curvature_zero_everywhere_none_outside() {
+        let line = LineSeg3d::create(DVec([1.0, 2.0, 3.0]), DVec([4.0, 6.0, 3.0]));
+        let len = line.length();
+        assert_eq!(line.curvature(0.0), Some(DVec([0.0; 3])));
+        assert_eq!(line.curvature(len / 2.0), Some(DVec([0.0; 3])));
+        assert_eq!(line.curvature(len), Some(DVec([0.0; 3])));
+        assert!(line.curvature(-0.001).is_none());
+        assert!(line.curvature(len + 0.001).is_none());
+    }
+
+    #[test]
+    fn is_closed() {
+        let open = LineSeg3d::create(DVec([0.0, 0.0, 0.0]), DVec([1.0, 0.0, 0.0]));
+        assert!(!open.is_closed());
+        // A zero-length line (same point for both endpoints) is closed.
+        let closed = LineSeg3d::create(DVec([1.0, 2.0, 3.0]), DVec([1.0, 2.0, 3.0]));
+        assert!(closed.is_closed());
     }
 }
