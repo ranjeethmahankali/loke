@@ -1,0 +1,31 @@
+#+title: Loke: Curve Library
+#+author: Ranjeeth Mahankali
+
+* NEXT Support Ellipses
+  :PROPERTIES:
+  :CREATED:  2026-06-06 Sat 16:40
+  :END:
+  :LOGBOOK:
+  - State "NEXT"       from "TODO"       [2026-06-06 Sat 16:48]
+  :END:
+
+  They can be represented as a SLERP of vectors of unequal lengths. Very similar
+  to how arcs work, and just need the =TrigonometryAdaptor=. This will unlock
+  the ability to projects arcs onto arbitrary planes.
+
+  Still unclear whether to extend arcs to support both arcs and ellipses, or
+  make a new curve type.
+
+* TODO Projecting curves on to a plane
+  :PROPERTIES:
+  :CREATED:  2026-06-06 Sat 16:44
+  :END:
+
+  Once ellipses are figured out, this should be relatively trivial to implement.
+
+* TODO Implement Polycurves
+  :PROPERTIES:
+  :CREATED:  2026-06-06 Sat 16:36
+  :END:
+
+  This will include the ability to join polycurves via the Euler walk.
