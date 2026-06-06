@@ -1,20 +1,27 @@
 #+title: Loke: Curve Library
 #+author: Ranjeeth Mahankali
 
-* NEXT Support Ellipses
+* TODO Trimming Curves
   :PROPERTIES:
-  :CREATED:  2026-06-06 Sat 16:40
-  :END:
-  :LOGBOOK:
-  - State "NEXT"       from "TODO"       [2026-06-06 Sat 16:48]
+  :CREATED:  2026-06-06 Sat 18:13
   :END:
 
-  They can be represented as a SLERP of vectors of unequal lengths. Very similar
-  to how arcs work, and just need the =TrigonometryAdaptor=. This will unlock
-  the ability to projects arcs onto arbitrary planes.
+  - trim_left should remove the section of the curve from the start up to the
+    provided parameter.
+  - trim_right remove the section from the parameter to the end of the curve.
+  - extract_interval should trim both the left and right sides of the given pair
+    of parameters.
 
-  Still unclear whether to extend arcs to support both arcs and ellipses, or
-  make a new curve type.
+  It is yet unclear whether these functions should modify the curve in place, or
+  return a modified copy. Needs more thought.
+
+** TODO Knot Insertion
+   :PROPERTIES:
+   :CREATED:  2026-06-06 Sat 18:43
+   :END:
+
+   Inserting knots in a spline is required for splitting splines. The algo is
+   described [[docview:~/zettelkasten/ntop-zettelkasten/data/e9/bbaa4f-ef2e-42ef-99ea-b489c591fbcf/The NURBS Book.pdf::152][here in the NURBS book]].
 
 * TODO Projecting curves on to a plane
   :PROPERTIES:
@@ -22,6 +29,9 @@
   :END:
 
   Once ellipses are figured out, this should be relatively trivial to implement.
+
+  Since all curves are interpolations of points and vectors, this can be
+  implemented more generally as an affine transformation of points.
 
 * TODO Implement Polycurves
   :PROPERTIES:
