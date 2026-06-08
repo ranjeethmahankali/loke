@@ -11,6 +11,11 @@ pub type Arc3d = Arc<3, F64Adaptor>;
 pub type Arc2f = Arc<2, F32Adaptor>;
 pub type Arc3f = Arc<3, F32Adaptor>;
 
+pub type EllipticArc2d = EllipticArc<2, F64Adaptor>;
+pub type EllipticArc3d = EllipticArc<3, F64Adaptor>;
+pub type EllipticArc2f = EllipticArc<2, F32Adaptor>;
+pub type EllipticArc3f = EllipticArc<3, F32Adaptor>;
+
 #[derive(Clone, Debug)]
 pub struct Arc<const DIM: usize, A>
 where
@@ -21,7 +26,19 @@ where
     mid_dir: A::Vector,   // Unit vector from center toward midpoint (used for antipodal SLERP).
     end_dir: A::Vector,   // Unit vector from center toward end.
     radius: A::Scalar,
-    angle: A::Scalar, // Signed sweep angle from start to end through mid.
+    angle: A::Scalar, // Sweep angle from start to end through mid.
+}
+
+#[derive(Clone, Debug)]
+pub struct EllipticArc<const DIM: usize, A>
+where
+    A: Adaptor<DIM>,
+{
+    center: A::Vector,
+    start_vec: A::Vector, // Vector from center toward start.
+    mid_vec: A::Vector,   // Vector from center toward midpoint (used for antipodal SLERP).
+    end_vec: A::Vector,   // Vector from center toward end.
+    angle: A::Scalar,     // Sweep angle from start_vec to end_vec, through mid_vec.
 }
 
 impl<const DIM: usize, A> Arc<DIM, A>
@@ -347,6 +364,31 @@ where
     }
 }
 
+impl<const DIM: usize, A: Adaptor<DIM>> From<Arc<DIM, A>> for EllipticArc<DIM, A> {
+    fn from(arc: Arc<DIM, A>) -> Self {
+        Self {
+            center: arc.center,
+            start_vec: arc.start_dir * arc.radius,
+            mid_vec: arc.mid_dir * arc.radius,
+            end_vec: arc.end_dir * arc.radius,
+            angle: arc.angle,
+        }
+    }
+}
+
+impl<const DIM: usize, A: Adaptor<DIM>> From<&Arc<DIM, A>> for EllipticArc<DIM, A> {
+    fn from(arc: &Arc<DIM, A>) -> Self {
+        Self {
+            center: arc.center,
+            start_vec: arc.start_dir * arc.radius,
+            mid_vec: arc.mid_dir * arc.radius,
+            end_vec: arc.end_dir * arc.radius,
+            angle: arc.angle,
+        }
+    }
+}
+
+/// 3d arcs have some special features that don't exist in other dimensions.
 impl<A> Arc<3, A>
 where
     A: Adaptor<3> + TrigonometryAdaptor,
