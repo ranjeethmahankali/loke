@@ -364,6 +364,59 @@ where
     }
 }
 
+impl<const DIM: usize, A: Adaptor<DIM>> EllipticArc<DIM, A> {
+    pub fn from_projected_arc(
+        arc: &Arc<DIM, A>,
+        plane_pt: A::Vector,
+        plane_normal: A::Vector,
+    ) -> Self {
+        let (start_dir, mid_dir, end_dir) = (
+            arc.start_dir * arc.radius,
+            arc.mid_dir * arc.radius,
+            arc.end_dir * arc.radius,
+        );
+        Self {
+            center: todo!(),
+            start_vec: todo!(),
+            mid_vec: todo!(),
+            end_vec: todo!(),
+            angle: todo!(),
+        }
+    }
+
+    pub fn from_center_start_end(
+        center: A::Vector,
+        start: A::Vector,
+        end: A::Vector,
+        flip_dir: bool,
+    ) -> Result<Self, Error>
+    where
+        A: TrigonometryAdaptor,
+    {
+        let start_dir = start - center;
+        let end_dir = end - center;
+        let start_udir = A::normalize(start_dir);
+        let end_udir = A::normalize(end_dir);
+        let angle = A::acos(A::clamp(
+            A::dot_product(start_udir, end_udir),
+            A::scalar(-1.0),
+            A::scalar(1.0),
+        ));
+        if angle < A::epsilon() || angle > (A::scalar(PI) - A::epsilon()) {
+            return Err(Error::DegenerateValue);
+        }
+
+        let mid_dir = todo!();
+        Ok(Self {
+            center: center,
+            start_vec: todo!(),
+            mid_vec: todo!(),
+            end_vec: todo!(),
+            angle: todo!(),
+        })
+    }
+}
+
 impl<const DIM: usize, A: Adaptor<DIM>> From<Arc<DIM, A>> for EllipticArc<DIM, A> {
     fn from(arc: Arc<DIM, A>) -> Self {
         Self {
