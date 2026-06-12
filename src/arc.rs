@@ -369,18 +369,33 @@ impl<const DIM: usize, A: Adaptor<DIM>> EllipticArc<DIM, A> {
         arc: &Arc<DIM, A>,
         plane_pt: A::Vector,
         plane_normal: A::Vector,
-    ) -> Self {
-        let (start_dir, mid_dir, end_dir) = (
+    ) -> Self
+    where
+        A: TrigonometryAdaptor,
+    {
+        let plane_normal = A::normalize(plane_normal);
+        let center =
+            arc.center - plane_normal * A::dot_product(plane_normal, arc.center - plane_pt);
+        let [start_vec, mid_vec, end_vec] = [
             arc.start_dir * arc.radius,
             arc.mid_dir * arc.radius,
             arc.end_dir * arc.radius,
-        );
+        ]
+        .map(|v| v - plane_normal * A::dot_product(plane_normal, v));
+        let mut angle = A::acos(A::clamp(
+            A::dot_product(A::normalize(start_vec), A::normalize(end_vec)),
+            A::scalar(-1.0),
+            A::scalar(1.0),
+        ));
+        if arc.angle > A::scalar(PI) {
+            angle = A::scalar(TAU) - angle;
+        }
         Self {
-            center: todo!(),
-            start_vec: todo!(),
-            mid_vec: todo!(),
-            end_vec: todo!(),
-            angle: todo!(),
+            center,
+            start_vec,
+            mid_vec,
+            end_vec,
+            angle,
         }
     }
 
@@ -398,10 +413,8 @@ impl<const DIM: usize, A: Adaptor<DIM>> EllipticArc<DIM, A> {
             return Err(Error::DegenerateValue);
         }
         let end_vec = end - center;
-        let start_udir = A::normalize(start_vec);
-        let end_udir = A::normalize(end_vec);
         let mut angle = A::acos(A::clamp(
-            A::dot_product(start_udir, end_udir),
+            A::dot_product(A::normalize(start_vec), A::normalize(end_vec)),
             A::scalar(-1.0),
             A::scalar(1.0),
         ));
