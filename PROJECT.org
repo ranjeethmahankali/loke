@@ -22,6 +22,25 @@
   exactly at the vectors being interpolated, as you change the parameter from 0
   to 1.
 
+  <2026-06-12 Fri 10:11> Addeed simple functions to create elliptic arcs and
+  tests for them. Now starting to expand the API.
+
+** TODO Implement adaptive and uniform sampling for elliptic arcs
+   :PROPERTIES:
+   :CREATED:  2026-06-12 Fri 10:29
+   :END:
+
+* TODO Change the domains of Arc and LineSegment
+  :PROPERTIES:
+  :CREATED:  2026-06-12 Fri 10:12
+  :END:
+
+  Arc length parametrization is not possible for ellipses. It feels a bit bolted
+  on to the arcs and lines too, since the internal representation just
+  interpolates between 0 and 1, and we just pretend from the outside that they
+  are length parametrized. It feels better to just parametrize Arc and
+  LineSegment from 0 to 1, and just let the Spline do its thing.
+
 * TODO Trimming Curves
   :PROPERTIES:
   :CREATED:  2026-06-06 Sat 18:13

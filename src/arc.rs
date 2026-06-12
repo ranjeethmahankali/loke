@@ -441,12 +441,74 @@ impl<const DIM: usize, A: Adaptor<DIM>> EllipticArc<DIM, A> {
             mid_vec = -mid_vec;
         }
         Ok(Self {
-            center: center,
+            center,
             start_vec,
             mid_vec,
             end_vec,
             angle,
         })
+    }
+
+    pub fn domain(&self) -> (A::Scalar, A::Scalar) {
+        (A::scalar(0.0), A::scalar(1.0))
+    }
+
+    pub fn length(&self) -> A::Scalar {
+        todo!();
+    }
+
+    pub fn center(&self) -> A::Vector {
+        self.center
+    }
+
+    pub fn focii(&self) -> (A::Vector, A::Vector) {
+        todo!();
+    }
+
+    pub fn angle(&self) -> A::Scalar {
+        self.angle
+    }
+
+    pub fn start(&self) -> A::Vector {
+        self.center + self.start_vec
+    }
+
+    pub fn end(&self) -> A::Vector {
+        self.center + self.end_vec
+    }
+
+    pub fn point(&self) -> A::Vector {
+        todo!()
+    }
+
+    pub fn tangent(&self) -> A::Vector {
+        todo!()
+    }
+
+    pub fn curvature(&self) -> A::Vector {
+        todo!()
+    }
+
+    pub fn point_with_deriv(&self) -> A::Vector {
+        todo!()
+    }
+
+    pub fn bounds(&self) -> (A::Scalar, A::Scalar) {
+        todo!()
+    }
+
+    pub fn reversed(&self) -> Self {
+        Self {
+            center: self.center,
+            start_vec: self.end_vec,
+            mid_vec: self.mid_vec,
+            end_vec: self.start_vec,
+            angle: self.angle,
+        }
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.start() == self.end()
     }
 }
 
