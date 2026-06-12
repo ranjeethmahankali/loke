@@ -2820,4 +2820,52 @@ mod test {
         // so they should be unchanged since the arc is already in the XY plane.
         assert!((earc.start_vec - DVec([1.0, 0.0, 0.0])).length() < 1e-10);
     }
+
+    // ===================== EllipticArc::point and tangent =====================
+
+    #[test]
+    fn t_elliptic_arc_point() {
+        // Unit quarter circle: center=origin, start=(1,0,0), end=(0,1,0).
+        let earc = EllipticArc3d::from_center_start_end(
+            DVec([0.0, 0.0, 0.0]),
+            DVec([1.0, 0.0, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+            false,
+        )
+        .unwrap();
+        // Endpoints.
+        assert!((earc.point(0.0).unwrap() - DVec([1.0, 0.0, 0.0])).length() < 1e-10);
+        assert!((earc.point(1.0).unwrap() - DVec([0.0, 1.0, 0.0])).length() < 1e-10);
+        // Midpoint of a unit quarter circle lies on (√2/2, √2/2, 0).
+        let pm = earc.point(0.5).unwrap();
+        assert!(
+            (pm - DVec([FRAC_1_SQRT_2, FRAC_1_SQRT_2, 0.0])).length() < 1e-10,
+            "pm={pm:?}"
+        );
+        // Out of domain.
+        assert!(earc.point(-0.001).is_none());
+        assert!(earc.point(1.001).is_none());
+    }
+
+    #[test]
+    fn t_elliptic_arc_tangent() {
+        // Circular arc (radius 3, center offset): tangent must be perpendicular to radius
+        // at every sampled point, and out-of-domain must return None.
+        let earc = EllipticArc3d::from_center_start_end(
+            DVec([1.0, 2.0, 0.0]),
+            DVec([4.0, 2.0, 0.0]), // start = center + (3,0,0)
+            DVec([1.0, 5.0, 0.0]), // end   = center + (0,3,0)
+            false,
+        )
+        .unwrap();
+        for i in 0..=8 {
+            let t = i as f64 / 8.0;
+            let p = earc.point(t).unwrap();
+            let tan = earc.tangent(t).unwrap();
+            let dot = (p - earc.center()).dot(tan).abs();
+            assert!(dot < 1e-10, "t={t}: dot={dot}");
+        }
+        assert!(earc.tangent(-0.001).is_none());
+        assert!(earc.tangent(1.001).is_none());
+    }
 }
