@@ -369,7 +369,7 @@ impl<const DIM: usize, A: Adaptor<DIM>> EllipticArc<DIM, A> {
         arc: &Arc<DIM, A>,
         plane_pt: A::Vector,
         plane_normal: A::Vector,
-    ) -> Self
+    ) -> Result<Self, Error>
     where
         A: TrigonometryAdaptor,
     {
@@ -382,6 +382,12 @@ impl<const DIM: usize, A: Adaptor<DIM>> EllipticArc<DIM, A> {
             arc.end_dir * arc.radius,
         ]
         .map(|v| v - plane_normal * A::dot_product(plane_normal, v));
+        if [start_vec, mid_vec, end_vec]
+            .iter()
+            .any(|v| A::vector_length(*v) < A::epsilon())
+        {
+            return Err(Error::DegenerateValue);
+        }
         let mut angle = A::acos(A::clamp(
             A::dot_product(A::normalize(start_vec), A::normalize(end_vec)),
             A::scalar(-1.0),
@@ -390,13 +396,13 @@ impl<const DIM: usize, A: Adaptor<DIM>> EllipticArc<DIM, A> {
         if arc.angle > A::scalar(PI) {
             angle = A::scalar(TAU) - angle;
         }
-        Self {
+        Ok(Self {
             center,
             start_vec,
             mid_vec,
             end_vec,
             angle,
-        }
+        })
     }
 
     pub fn from_center_start_end(
