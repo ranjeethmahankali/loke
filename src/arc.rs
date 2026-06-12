@@ -419,16 +419,22 @@ impl<const DIM: usize, A: Adaptor<DIM>> EllipticArc<DIM, A> {
             return Err(Error::DegenerateValue);
         }
         let end_vec = end - center;
+        if A::vector_length(start_vec) < A::epsilon() || A::vector_length(end_vec) < A::epsilon() {
+            return Err(Error::DegenerateValue);
+        }
         let mut angle = A::acos(A::clamp(
             A::dot_product(A::normalize(start_vec), A::normalize(end_vec)),
             A::scalar(-1.0),
             A::scalar(1.0),
         ));
-        if angle < A::epsilon() || angle > (A::scalar(PI) - A::epsilon()) {
+        if angle < A::epsilon() || angle >= (A::scalar(PI) - A::epsilon()) {
             return Err(Error::DegenerateValue);
         }
         let [tstart, tend] = slerp_raw::<A>(angle, A::scalar(0.5));
         let mut mid_vec = tstart * start_vec + tend * end_vec;
+        if A::vector_length(mid_vec) < A::epsilon() {
+            return Err(Error::DegenerateValue);
+        }
         // Flip the direction if necessary.
         if flip_dir {
             angle = A::scalar(TAU) - angle;
@@ -2477,5 +2483,257 @@ mod test {
         )
         .unwrap();
         assert!(!quarter.is_closed());
+    }
+
+    // ===================== EllipticArc::from_center_start_end =====================
+
+    #[test]
+    fn t_center_start_end_minor_arc() {
+        // Quarter arc: center at origin, start on +X, end on +Y.
+        let earc = EllipticArc3d::from_center_start_end(
+            DVec([0.0, 0.0, 0.0]),
+            DVec([1.0, 0.0, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+            false,
+        )
+        .unwrap();
+        assert!(
+            (earc.angle - PI / 2.0).abs() < 1e-10,
+            "angle = {}",
+            earc.angle
+        );
+        // start_vec and end_vec should match the input vectors from center.
+        assert!((earc.start_vec - DVec([1.0, 0.0, 0.0])).length() < 1e-10);
+        assert!((earc.end_vec - DVec([0.0, 1.0, 0.0])).length() < 1e-10);
+        // mid_vec should point toward (1,1,0) normalized * radius = (√2/2, √2/2, 0).
+        let mid_dir = earc.mid_vec.normalize();
+        let expected_mid_dir = DVec([FRAC_1_SQRT_2, FRAC_1_SQRT_2, 0.0]);
+        assert!(
+            (mid_dir - expected_mid_dir).length() < 1e-10,
+            "mid_dir = {:?}",
+            mid_dir
+        );
+        // mid_vec magnitude should equal the radius (circular case, equal magnitudes).
+        assert!((earc.mid_vec.length() - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn t_center_start_end_flip_dir() {
+        let center = DVec([0.0, 0.0, 0.0]);
+        let start = DVec([1.0, 0.0, 0.0]);
+        let end = DVec([0.0, 1.0, 0.0]);
+        let minor = EllipticArc3d::from_center_start_end(center, start, end, false).unwrap();
+        let major = EllipticArc3d::from_center_start_end(center, start, end, true).unwrap();
+        // Angles should sum to TAU.
+        assert!(
+            (minor.angle + major.angle - TAU).abs() < 1e-10,
+            "minor={} major={}",
+            minor.angle,
+            major.angle
+        );
+        // mid_vecs should be negations of each other.
+        assert!(
+            (minor.mid_vec + major.mid_vec).length() < 1e-10,
+            "minor.mid={:?} major.mid={:?}",
+            minor.mid_vec,
+            major.mid_vec
+        );
+        // start_vec and end_vec are the same for both.
+        assert!((minor.start_vec - major.start_vec).length() < 1e-10);
+        assert!((minor.end_vec - major.end_vec).length() < 1e-10);
+    }
+
+    #[test]
+    fn t_center_start_end_degenerate() {
+        // Coincident start and end (angle ≈ 0).
+        assert!(
+            EllipticArc3d::from_center_start_end(
+                DVec([0.0, 0.0, 0.0]),
+                DVec([1.0, 0.0, 0.0]),
+                DVec([1.0, 0.0, 0.0]),
+                false,
+            )
+            .is_err()
+        );
+        // Antipodal start and end (angle ≈ π).
+        assert!(
+            EllipticArc3d::from_center_start_end(
+                DVec([0.0, 0.0, 0.0]),
+                DVec([1.0, 0.0, 0.0]),
+                DVec([-1.0, 0.0, 0.0]),
+                false,
+            )
+            .is_err()
+        );
+        // Center coincides with start.
+        assert!(
+            EllipticArc3d::from_center_start_end(
+                DVec([1.0, 0.0, 0.0]),
+                DVec([1.0, 0.0, 0.0]),
+                DVec([0.0, 1.0, 0.0]),
+                false,
+            )
+            .is_err()
+        );
+        // Center coincides with end.
+        assert!(
+            EllipticArc3d::from_center_start_end(
+                DVec([0.0, 1.0, 0.0]),
+                DVec([1.0, 0.0, 0.0]),
+                DVec([0.0, 1.0, 0.0]),
+                false,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn t_center_start_end_matches_arc_from_three_points() {
+        // Build a circular arc via Arc::from_three_points, convert to EllipticArc,
+        // and compare with from_center_start_end using the same center/start/end.
+        let arc = Arc3d::from_three_points(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([FRAC_1_SQRT_2, FRAC_1_SQRT_2, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+        )
+        .unwrap();
+        let from_arc: EllipticArc3d = (&arc).into();
+        let from_cse =
+            EllipticArc3d::from_center_start_end(arc.center(), arc.start(), arc.end(), false)
+                .unwrap();
+        assert!((from_arc.angle - from_cse.angle).abs() < 1e-10);
+        assert!((from_arc.start_vec - from_cse.start_vec).length() < 1e-10);
+        assert!((from_arc.end_vec - from_cse.end_vec).length() < 1e-10);
+        // mid_vec directions should match (magnitudes are equal for circular case).
+        assert!((from_arc.mid_vec.normalize() - from_cse.mid_vec.normalize()).length() < 1e-10);
+    }
+
+    #[test]
+    fn t_center_start_end_3d_off_axis() {
+        // Non-axis-aligned arc in 3D with offset center.
+        let center = DVec([1.0, 2.0, 3.0]);
+        let start = DVec([2.0, 2.0, 3.0]); // +X from center
+        let end = DVec([1.0, 3.0, 3.0]); // +Y from center
+        let earc = EllipticArc3d::from_center_start_end(center, start, end, false).unwrap();
+        assert!((earc.angle - PI / 2.0).abs() < 1e-10);
+        assert!((earc.center - center).length() < 1e-10);
+        assert!((earc.start_vec - DVec([1.0, 0.0, 0.0])).length() < 1e-10);
+        assert!((earc.end_vec - DVec([0.0, 1.0, 0.0])).length() < 1e-10);
+    }
+
+    // ===================== EllipticArc::from_projected_arc =====================
+
+    #[test]
+    fn t_projected_arc_identity() {
+        // Projecting an arc in the XY plane onto the XY plane should give the same arc.
+        let arc = Arc3d::from_three_points(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+            DVec([-1.0, 0.0, 0.0]),
+        )
+        .unwrap();
+        let earc =
+            EllipticArc3d::from_projected_arc(&arc, DVec([0.0, 0.0, 0.0]), DVec([0.0, 0.0, 1.0]))
+                .unwrap();
+        let from_arc: EllipticArc3d = (&arc).into();
+        assert!((earc.angle - from_arc.angle).abs() < 1e-10);
+        assert!((earc.start_vec - from_arc.start_vec).length() < 1e-10);
+        assert!((earc.mid_vec - from_arc.mid_vec).length() < 1e-10);
+        assert!((earc.end_vec - from_arc.end_vec).length() < 1e-10);
+        assert!((earc.center - from_arc.center).length() < 1e-10);
+    }
+
+    #[test]
+    fn t_projected_arc_oblique() {
+        // Arc in XY plane projected onto a tilted plane.
+        // Semicircle r=1 in XY from (1,0,0) through (0,1,0) to (-1,0,0).
+        let arc = Arc3d::from_three_points(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+            DVec([-1.0, 0.0, 0.0]),
+        )
+        .unwrap();
+        // Project onto a plane tilted 45° around X axis (normal = (0, -sin45, cos45)).
+        let normal = DVec([0.0, -FRAC_1_SQRT_2, FRAC_1_SQRT_2]);
+        let earc = EllipticArc3d::from_projected_arc(&arc, DVec([0.0, 0.0, 0.0]), normal).unwrap();
+        // Start and end are on the X axis, so they're unaffected by Y/Z projection.
+        assert!((earc.start_vec - DVec([1.0, 0.0, 0.0])).length() < 1e-10);
+        assert!((earc.end_vec - DVec([-1.0, 0.0, 0.0])).length() < 1e-10);
+        // The projected mid_vec should have reduced Y component.
+        // Original mid_vec = (0, 1, 0). Projection removes component along normal.
+        // proj = (0,1,0) - normal * dot(normal, (0,1,0))
+        //      = (0,1,0) - (0,-√2/2,√2/2) * (-√2/2) = (0,1,0) - (0,0.5,-0.5) = (0,0.5,0.5)
+        let expected_mid = DVec([0.0, 0.5, 0.5]);
+        assert!(
+            (earc.mid_vec - expected_mid).length() < 1e-10,
+            "mid_vec = {:?}, expected {:?}",
+            earc.mid_vec,
+            expected_mid
+        );
+        // Projected angle: start_vec=(1,0,0), end_vec=(-1,0,0) → angle=π (semicircle preserved).
+        assert!((earc.angle - PI).abs() < 1e-10);
+    }
+
+    #[test]
+    fn t_projected_arc_major_arc_preserved() {
+        // A major arc should remain a major arc after projection.
+        // Arc in XY plane going the long way: start=(1,0,0), through (0,-1,0), to (0,1,0).
+        let arc = Arc3d::from_three_points(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([0.0, -1.0, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+        )
+        .unwrap();
+        assert!(arc.angle() > PI, "precondition: arc should be major");
+        // Project onto a plane tilted slightly from XY (normal nearly +Z).
+        // This shrinks Z components but preserves all directions in XY.
+        let earc =
+            EllipticArc3d::from_projected_arc(&arc, DVec([0.0, 0.0, 0.0]), DVec([0.0, 0.0, 1.0]))
+                .unwrap();
+        assert!(
+            earc.angle > PI,
+            "projected major arc should remain major, got angle={}",
+            earc.angle
+        );
+    }
+
+    #[test]
+    fn t_projected_arc_degenerate() {
+        // Arc in XY plane projected along Y axis → all vectors collapse to X axis.
+        let arc = Arc3d::from_three_points(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+            DVec([-1.0, 0.0, 0.0]),
+        )
+        .unwrap();
+        // Project along the arc's plane normal: plane normal = (0,0,1) projected with
+        // projection normal = (0,1,0) means removing Y. mid_dir=(0,1,0) becomes zero.
+        let result =
+            EllipticArc3d::from_projected_arc(&arc, DVec([0.0, 0.0, 0.0]), DVec([0.0, 1.0, 0.0]));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn t_projected_arc_offset_plane() {
+        // Verify projection onto an offset plane shifts the center correctly.
+        let arc = Arc3d::from_three_points(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+            DVec([-1.0, 0.0, 0.0]),
+        )
+        .unwrap();
+        // Project onto Z=5 plane (normal=(0,0,1), point=(0,0,5)).
+        let earc =
+            EllipticArc3d::from_projected_arc(&arc, DVec([0.0, 0.0, 5.0]), DVec([0.0, 0.0, 1.0]))
+                .unwrap();
+        // Arc center is at (0,0,0), projected to Z=5 → center should be (0,0,5).
+        assert!(
+            (earc.center - DVec([0.0, 0.0, 5.0])).length() < 1e-10,
+            "center = {:?}",
+            earc.center
+        );
+        // Vectors from center are projections of direction vectors (Z component removed),
+        // so they should be unchanged since the arc is already in the XY plane.
+        assert!((earc.start_vec - DVec([1.0, 0.0, 0.0])).length() < 1e-10);
     }
 }
