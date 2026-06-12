@@ -477,19 +477,46 @@ impl<const DIM: usize, A: Adaptor<DIM>> EllipticArc<DIM, A> {
         self.center + self.end_vec
     }
 
-    pub fn point(&self) -> A::Vector {
+    pub fn point(&self, t: A::Scalar) -> Option<A::Vector>
+    where
+        A: TrigonometryAdaptor,
+    {
+        if t < A::scalar(0.0) || t > A::scalar(1.0) {
+            return None;
+        }
+        let coeff = slerp::<A>(self.angle, t);
+        Some(
+            self.center
+                + self.start_vec * coeff[0]
+                + self.mid_vec * coeff[1]
+                + self.end_vec * coeff[2],
+        )
+    }
+
+    pub fn tangent(&self, t: A::Scalar) -> Option<A::Vector>
+    where
+        A: TrigonometryAdaptor,
+    {
+        if t < A::scalar(0.0) || t > A::scalar(1.0) {
+            return None;
+        }
+        let coeff = slerp::<A>(self.angle, t);
+        Some(
+            self.center
+                + self.start_vec * coeff[0]
+                + self.mid_vec * coeff[1]
+                + self.end_vec * coeff[2],
+        )
+    }
+
+    pub fn curvature(&self) -> Option<A::Vector>
+    where
+        A: TrigonometryAdaptor,
+    {
         todo!()
     }
 
-    pub fn tangent(&self) -> A::Vector {
-        todo!()
-    }
-
-    pub fn curvature(&self) -> A::Vector {
-        todo!()
-    }
-
-    pub fn point_with_deriv(&self) -> A::Vector {
+    pub fn point_with_deriv(&self) -> Option<A::Scalar> {
         todo!()
     }
 
