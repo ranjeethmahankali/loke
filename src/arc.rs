@@ -500,13 +500,8 @@ impl<const DIM: usize, A: Adaptor<DIM>> EllipticArc<DIM, A> {
         if t < A::scalar(0.0) || t > A::scalar(1.0) {
             return None;
         }
-        let coeff = slerp::<A>(self.angle, t);
-        Some(
-            self.center
-                + self.start_vec * coeff[0]
-                + self.mid_vec * coeff[1]
-                + self.end_vec * coeff[2],
-        )
+        let coeff = slerp_deriv::<A>(self.angle, t);
+        Some(self.start_vec * coeff[0] + self.mid_vec * coeff[1] + self.end_vec * coeff[2])
     }
 
     pub fn curvature(&self) -> Option<A::Vector>
