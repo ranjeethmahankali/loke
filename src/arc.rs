@@ -393,11 +393,14 @@ impl<const DIM: usize, A: Adaptor<DIM>> EllipticArc<DIM, A> {
     where
         A: TrigonometryAdaptor,
     {
-        let start_dir = start - center;
-        let end_dir = end - center;
-        let start_udir = A::normalize(start_dir);
-        let end_udir = A::normalize(end_dir);
-        let angle = A::acos(A::clamp(
+        let start_vec = start - center;
+        if A::vector_length(start - end) < A::epsilon() {
+            return Err(Error::DegenerateValue);
+        }
+        let end_vec = end - center;
+        let start_udir = A::normalize(start_vec);
+        let end_udir = A::normalize(end_vec);
+        let mut angle = A::acos(A::clamp(
             A::dot_product(start_udir, end_udir),
             A::scalar(-1.0),
             A::scalar(1.0),
@@ -405,14 +408,19 @@ impl<const DIM: usize, A: Adaptor<DIM>> EllipticArc<DIM, A> {
         if angle < A::epsilon() || angle > (A::scalar(PI) - A::epsilon()) {
             return Err(Error::DegenerateValue);
         }
-
-        let mid_dir = todo!();
+        let [tstart, tend] = slerp_raw::<A>(angle, A::scalar(0.5));
+        let mut mid_vec = tstart * start_vec + tend * end_vec;
+        // Flip the direction if necessary.
+        if flip_dir {
+            angle = A::scalar(TAU) - angle;
+            mid_vec = -mid_vec;
+        }
         Ok(Self {
             center: center,
-            start_vec: todo!(),
-            mid_vec: todo!(),
-            end_vec: todo!(),
-            angle: todo!(),
+            start_vec,
+            mid_vec,
+            end_vec,
+            angle,
         })
     }
 }
