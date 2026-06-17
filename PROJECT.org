@@ -79,3 +79,16 @@
   :END:
 
   This will include the ability to join polycurves via the Euler walk.
+
+* DONE loke (misc-features): Implement basic curve features
+  CLOSED: [2026-06-06 Sat 16:32]
+  :PROPERTIES:
+  :CREATED:  2026-06-06 Sat 16:31
+  :END:
+  :LOGBOOK:
+  - State "DONE"       from "NEXT"       [2026-06-06 Sat 16:32]
+  - State "NEXT"       from "TODO"       [2026-06-06 Sat 16:32]
+  :END:
+
+  <2026-06-06 Sat 16:31> Implemented curvature query for all curve
+  types. Merging this for now.
