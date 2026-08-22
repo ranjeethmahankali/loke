@@ -1,0 +1,59 @@
+#+title: Loke: Curve Library
+#+author: Ranjeeth Mahankali
+
+* NEXT Support Ellipses
+  :PROPERTIES:
+  :CREATED:  2026-06-06 Sat 16:40
+  :END:
+  :LOGBOOK:
+  - State "NEXT"       from "TODO"       [2026-06-06 Sat 16:48]
+  :END:
+
+  They can be represented as a SLERP of vectors of unequal lengths. Very similar to how arcs work,
+  and just need the =TrigonometryAdaptor=. This will unlock the ability to projects arcs onto
+  arbitrary planes.
+
+  Still unclear whether to extend arcs to support both arcs and ellipses, or make a new curve type.
+
+* TODO Projecting curves on to a plane
+  :PROPERTIES:
+  :CREATED:  2026-06-06 Sat 16:44
+  :END:
+
+  Once ellipses are figured out, this should be relatively trivial to implement.
+
+  This basically involves applying a transformation matrix to all the vectors in the curve. Need to
+  use homogenous coorindates to project points and vectors differently.
+
+  I could implement this as a general library feature that takes a matrix and modifies the
+  curve. Unsure. Requires more thought. I need a way to judge the incoming matrix whether it soes a
+  rigid transformation, or it stretches and squeezes the space. If it is the latter, arcs will turn
+  into ellipses, and that needs to be handled. Maybe it's fine to assume the transformationn is
+  rigid, try to transform an arc, and if the error is bigger than epsilon during arc creation,
+  fallback to ellipse? Actually that last idea sounds good. It would preserve arcs that happen to
+  get projected on to a parallel plane, and only convert arcs to ellipses when there is a need.
+
+* TODO Closest Point
+  :PROPERTIES:
+  :CREATED:  2026-08-22 Sat 08:51
+  :END:
+
+  This could be a library feature. For maximum performance, splines would need to cache some
+  polynomials, and sample points. So maybe provide an 'projector' object that caches this stuff,
+  deals with all curve types, and projects points onto the curves.
+
+  Spline projection logic is dimension agnostic. Lines are trivial. Arcs are interesting.
+
+  I can write specialized logic for 2d and 3d arcs. I would need to look at the derivative
+  expression for the general dimension agnostic arc, and find all points where the dot product with
+  the query point and the tangent is zero. I wonder if I can generalize this. If I can, I should
+  compare the performance with the special case logic for 2d and 3d arcs. Maybe the generalization
+  is just as fast, and I don't need the specializations? Unlikely in 2d, unsure in 3d, very
+  interesting to try.
+
+* TODO Implement Polycurves
+  :PROPERTIES:
+  :CREATED:  2026-06-06 Sat 16:36
+  :END:
+
+  This will include the ability to join polycurves via the Euler walk.
