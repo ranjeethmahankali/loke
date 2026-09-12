@@ -4,7 +4,7 @@ use crate::{
     vec::{F32Adaptor, F64Adaptor},
 };
 use core::f64;
-use std::f64::consts::{PI, TAU};
+use std::f64::consts::{FRAC_PI_4, PI, TAU};
 
 pub type Arc2d = Arc<2, F64Adaptor>;
 pub type Arc3d = Arc<3, F64Adaptor>;
@@ -39,6 +39,49 @@ where
     mid_vec: A::Vector,   // Vector from center toward midpoint (used for antipodal SLERP).
     end_vec: A::Vector,   // Vector from center toward end.
     angle: A::Scalar,     // Sweep angle from start_vec to end_vec, through mid_vec.
+}
+
+impl<A> Arc<2, A>
+where
+    A: Adaptor<2>,
+{
+    pub fn unit_quadrant_arc(quadrant: u8) -> Self {
+        let quadrant = quadrant % 4;
+        match quadrant {
+            0 => Self {
+                center: A::zero_vector(),
+                start_dir: A::vector([A::scalar(1.0), A::scalar(0.0)]),
+                mid_dir: A::normalize(A::vector([A::scalar(1.0), A::scalar(1.0)])),
+                end_dir: A::vector([A::scalar(0.0), A::scalar(1.0)]),
+                radius: A::scalar(1.0),
+                angle: A::scalar(FRAC_PI_4),
+            },
+            1 => Self {
+                center: A::zero_vector(),
+                start_dir: A::vector([A::scalar(0.0), A::scalar(1.0)]),
+                mid_dir: A::normalize(A::vector([A::scalar(-1.0), A::scalar(1.0)])),
+                end_dir: A::vector([A::scalar(-1.0), A::scalar(0.0)]),
+                radius: A::scalar(1.0),
+                angle: A::scalar(FRAC_PI_4),
+            },
+            2 => Self {
+                center: A::zero_vector(),
+                start_dir: A::vector([A::scalar(-1.0), A::scalar(0.0)]),
+                mid_dir: A::normalize(A::vector([A::scalar(-1.0), A::scalar(-1.0)])),
+                end_dir: A::vector([A::scalar(0.0), A::scalar(-1.0)]),
+                radius: A::scalar(1.0),
+                angle: A::scalar(FRAC_PI_4),
+            },
+            _ => Self {
+                center: A::zero_vector(),
+                start_dir: A::vector([A::scalar(0.0), A::scalar(-1.0)]),
+                mid_dir: A::normalize(A::vector([A::scalar(1.0), A::scalar(-1.0)])),
+                end_dir: A::vector([A::scalar(1.0), A::scalar(0.0)]),
+                radius: A::scalar(1.0),
+                angle: A::scalar(FRAC_PI_4),
+            },
+        }
+    }
 }
 
 impl<const DIM: usize, A> Arc<DIM, A>
