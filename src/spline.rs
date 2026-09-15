@@ -337,22 +337,59 @@ where
         &self.power_basis_coeff[offset..(offset + n_coeff)]
     }
 
-    pub fn serialize(&self, w: impl std::io::Write) -> Result<(), std::io::Error>
+    pub fn serialize(&self, mut w: impl std::io::Write) -> Result<(), std::io::Error>
     where
-        A: SerialAdaptor,
+        A: SerialAdaptor<Value = A::Scalar>,
     {
         // Write n_knots, then n_control_points as a 64 bit integer each.  Then write n_knots
         // scalars via the serial adaptor.  Then write DIM x n_control_points scalars (all coords of
         // one vector one after another in x, y, z, x, y, z, pattern except dimension agnostic).
-        todo!()
+        w.write_all(&(self.knots.len() as u64).to_ne_bytes())?;
+        w.write_all(&(self.control_points.len() as u64).to_ne_bytes())?;
+        for &k in &self.knots {
+            A::write(k, &mut w)?;
+        }
+        for &cp in &self.control_points {
+            for coord in A::coord_arr(cp) {
+                A::write(coord, &mut w)?;
+            }
+        }
+        Ok(())
     }
 
-    pub fn deserialize(src: impl std::io::Read) -> Result<Self, std::io::Error>
+    pub fn deserialize(mut src: impl std::io::Read) -> Result<Self, std::io::Error>
     where
-        A: SerialAdaptor,
+        A: SerialAdaptor<Value = A::Scalar>,
     {
         // Deserialize the same order what was written out by serialize.
-        todo!()
+        let read_u64 = |src: &mut dyn std::io::Read| -> Result<u64, std::io::Error> {
+            let mut buf = [0u8; std::mem::size_of::<u64>()];
+            src.read_exact(&mut buf)?;
+            Ok(u64::from_ne_bytes(buf))
+        };
+        let n_knots = read_u64(&mut src)? as usize;
+        let n_control_points = read_u64(&mut src)? as usize;
+        let mut knots = Vec::with_capacity(n_knots);
+        for _ in 0..n_knots {
+            knots.push(A::read(&mut src)?);
+        }
+        let mut control_points = Vec::with_capacity(n_control_points);
+        for _ in 0..n_control_points {
+            let mut coords = [A::scalar(0.0); DIM];
+            for c in coords.iter_mut() {
+                *c = A::read(&mut src)?;
+            }
+            control_points.push(A::vector(coords));
+        }
+        let mut unique_knots = knots.clone();
+        unique_knots.dedup();
+        let power_basis_coeff = compute_polynomial_coeff::<DIM, A>(&knots, &control_points);
+        Ok(Self {
+            knots,
+            control_points,
+            power_basis_coeff,
+            unique_knots,
+        })
     }
 }
 
@@ -2778,5 +2815,28 @@ mod test {
             3,
         );
         assert!(closed.is_closed());
+    }
+
+    #[test]
+    fn t_serialize_deserialize_roundtrip() {
+        let spline = make_clamped(
+            &[
+                vec3(0., 0., 0.),
+                vec3(1., 2., -1.),
+                vec3(2., -3., 4.),
+                vec3(3., 5., -2.),
+                vec3(4., 0., 0.),
+            ],
+            3,
+        );
+        let mut bytes = Vec::new();
+        spline.serialize(&mut bytes).unwrap();
+        let restored = Spline3d::deserialize(&bytes[..]).unwrap();
+        assert_eq!(restored.knots, spline.knots);
+        assert_eq!(restored.control_points, spline.control_points);
+        assert_eq!(restored.unique_knots, spline.unique_knots);
+        assert_eq!(restored.power_basis_coeff, spline.power_basis_coeff);
+        assert_eq!(restored.degree(), spline.degree());
+        assert_eq!(restored.domain(), spline.domain());
     }
 }

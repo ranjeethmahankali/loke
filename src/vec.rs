@@ -519,13 +519,15 @@ impl SerialAdaptor for F64Adaptor {
     type Value = f64;
 
     #[inline(always)]
-    fn write(val: Self::Value, w: impl std::io::Write) -> Result<(), std::io::Error> {
-        <f64 as SerialAdaptor>::write(val, w)
+    fn write(val: Self::Value, mut w: impl std::io::Write) -> Result<(), std::io::Error> {
+        w.write_all(&val.to_ne_bytes())
     }
 
     #[inline(always)]
-    fn read(src: impl std::io::Read) -> Result<Self::Value, std::io::Error> {
-        <f64 as SerialAdaptor>::read(src)
+    fn read(mut src: impl std::io::Read) -> Result<Self::Value, std::io::Error> {
+        let mut buf = [0u8; std::mem::size_of::<f64>()];
+        src.read_exact(&mut buf)?;
+        Ok(f64::from_ne_bytes(buf))
     }
 }
 
@@ -578,12 +580,14 @@ impl SerialAdaptor for F32Adaptor {
     type Value = f32;
 
     #[inline(always)]
-    fn write(val: Self::Value, w: impl std::io::Write) -> Result<(), std::io::Error> {
-        <f32 as SerialAdaptor>::write(val, w)
+    fn write(val: Self::Value, mut w: impl std::io::Write) -> Result<(), std::io::Error> {
+        w.write_all(&val.to_ne_bytes())
     }
 
     #[inline(always)]
-    fn read(src: impl std::io::Read) -> Result<Self::Value, std::io::Error> {
-        <f32 as SerialAdaptor>::read(src)
+    fn read(mut src: impl std::io::Read) -> Result<Self::Value, std::io::Error> {
+        let mut buf = [0u8; std::mem::size_of::<f32>()];
+        src.read_exact(&mut buf)?;
+        Ok(f32::from_ne_bytes(buf))
     }
 }
