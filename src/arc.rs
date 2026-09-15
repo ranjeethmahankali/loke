@@ -394,10 +394,10 @@ where
     pub fn reversed(self) -> Self {
         Arc {
             center: self.center,
-            radius: self.radius,
             start_dir: self.end_dir,
             end_dir: self.start_dir,
             mid_dir: self.mid_dir,
+            radius: self.radius,
             angle: self.angle,
         }
     }
@@ -410,9 +410,7 @@ where
     where
         A: SerialAdaptor,
     {
-        // Write n_knots, then n_control_points as a 64 bit integer each.  Then write n_knots
-        // scalars via the serial adaptor.  Then write DIM x n_control_points scalars (all coords of
-        // one vector one after another in x, y, z, x, y, z, pattern except dimension agnostic).
+        // TODO: Write out the scalars of center, start_dir, mid_dir, end_dir, radius, angle, in that order.
         todo!()
     }
 

@@ -147,9 +147,7 @@ impl<const DIM: usize, A: Adaptor<DIM>> LineSeg<DIM, A> {
     where
         A: SerialAdaptor,
     {
-        // Write n_knots, then n_control_points as a 64 bit integer each.  Then write n_knots
-        // scalars via the serial adaptor.  Then write DIM x n_control_points scalars (all coords of
-        // one vector one after another in x, y, z, x, y, z, pattern except dimension agnostic).
+        // TODO: Write out the scalars of start and end points.
         todo!()
     }
 
