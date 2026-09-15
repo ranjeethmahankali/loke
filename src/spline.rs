@@ -2842,10 +2842,7 @@ mod test {
 
     #[test]
     fn t_serialize_deserialize_linear() {
-        let spline = make_clamped(
-            &[vec3(0., 0., 0.), vec3(1., 3., 0.), vec3(3., 1., 0.)],
-            1,
-        );
+        let spline = make_clamped(&[vec3(0., 0., 0.), vec3(1., 3., 0.), vec3(3., 1., 0.)], 1);
         let mut bytes = Vec::new();
         spline.serialize(&mut bytes).unwrap();
         let restored = Spline3d::deserialize(&bytes[..]).unwrap();
