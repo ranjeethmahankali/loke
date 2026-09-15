@@ -406,20 +406,45 @@ where
         self.start() == self.end()
     }
 
-    pub fn serialize(&self, w: impl std::io::Write) -> Result<(), std::io::Error>
+    pub fn serialize(&self, mut w: impl std::io::Write) -> Result<(), std::io::Error>
     where
-        A: SerialAdaptor,
+        A: SerialAdaptor<Value = A::Scalar>,
     {
-        // TODO: Write out the scalars of center, start_dir, mid_dir, end_dir, radius, angle, in that order.
-        todo!()
+        // Write out the scalars of center, start_dir, mid_dir, end_dir, radius, angle, in that order.
+        for v in [self.center, self.start_dir, self.mid_dir, self.end_dir] {
+            for coord in A::coord_arr(v) {
+                A::write(coord, &mut w)?;
+            }
+        }
+        A::write(self.radius, &mut w)?;
+        A::write(self.angle, &mut w)?;
+        Ok(())
     }
 
-    pub fn deserialize(src: impl std::io::Read) -> Result<Self, std::io::Error>
+    pub fn deserialize(mut src: impl std::io::Read) -> Result<Self, std::io::Error>
     where
-        A: SerialAdaptor,
+        A: SerialAdaptor<Value = A::Scalar>,
     {
         // Deserialize the same order what was written out by serialize.
-        todo!()
+        let mut vecs = [A::zero_vector(); 4];
+        for v in vecs.iter_mut() {
+            let mut coords = [A::scalar(0.0); DIM];
+            for c in coords.iter_mut() {
+                *c = A::read(&mut src)?;
+            }
+            *v = A::vector(coords);
+        }
+        let [center, start_dir, mid_dir, end_dir] = vecs;
+        let radius = A::read(&mut src)?;
+        let angle = A::read(&mut src)?;
+        Ok(Self {
+            center,
+            start_dir,
+            mid_dir,
+            end_dir,
+            radius,
+            angle,
+        })
     }
 }
 
@@ -2926,5 +2951,24 @@ mod test {
         }
         assert!(earc.tangent(-0.001).is_none());
         assert!(earc.tangent(1.001).is_none());
+    }
+
+    #[test]
+    fn t_arc_serialize_deserialize_roundtrip() {
+        let arc = Arc3d::from_three_points(
+            DVec([-1.0, 0.0, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+            DVec([1.0, 0.0, 0.0]),
+        )
+        .unwrap();
+        let mut bytes = Vec::new();
+        arc.serialize(&mut bytes).unwrap();
+        let restored = Arc3d::deserialize(&bytes[..]).unwrap();
+        assert_eq!(restored.center, arc.center);
+        assert_eq!(restored.start_dir, arc.start_dir);
+        assert_eq!(restored.mid_dir, arc.mid_dir);
+        assert_eq!(restored.end_dir, arc.end_dir);
+        assert_eq!(restored.radius, arc.radius);
+        assert_eq!(restored.angle, arc.angle);
     }
 }

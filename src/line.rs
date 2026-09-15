@@ -143,20 +143,35 @@ impl<const DIM: usize, A: Adaptor<DIM>> LineSeg<DIM, A> {
         self.from == self.to
     }
 
-    pub fn serialize(&self, w: impl std::io::Write) -> Result<(), std::io::Error>
+    pub fn serialize(&self, mut w: impl std::io::Write) -> Result<(), std::io::Error>
     where
-        A: SerialAdaptor,
+        A: SerialAdaptor<Value = A::Scalar>,
     {
-        // TODO: Write out the scalars of start and end points.
-        todo!()
+        // Write out the scalars of start and end points.
+        for coord in A::coord_arr(self.from) {
+            A::write(coord, &mut w)?;
+        }
+        for coord in A::coord_arr(self.to) {
+            A::write(coord, &mut w)?;
+        }
+        Ok(())
     }
 
-    pub fn deserialize(src: impl std::io::Read) -> Result<Self, std::io::Error>
+    pub fn deserialize(mut src: impl std::io::Read) -> Result<Self, std::io::Error>
     where
-        A: SerialAdaptor,
+        A: SerialAdaptor<Value = A::Scalar>,
     {
         // Deserialize the same order what was written out by serialize.
-        todo!()
+        let mut points = [A::zero_vector(); 2];
+        for p in points.iter_mut() {
+            let mut coords = [A::scalar(0.0); DIM];
+            for c in coords.iter_mut() {
+                *c = A::read(&mut src)?;
+            }
+            *p = A::vector(coords);
+        }
+        let [from, to] = points;
+        Ok(Self { from, to })
     }
 }
 
@@ -379,5 +394,15 @@ mod test {
         // A zero-length line (same point for both endpoints) is closed.
         let closed = LineSeg3d::create(DVec([1.0, 2.0, 3.0]), DVec([1.0, 2.0, 3.0]));
         assert!(closed.is_closed());
+    }
+
+    #[test]
+    fn t_serialize_deserialize_roundtrip() {
+        let line = LineSeg3d::create(DVec([1.0, 2.0, 3.0]), DVec([-4.0, 5.0, -6.0]));
+        let mut bytes = Vec::new();
+        line.serialize(&mut bytes).unwrap();
+        let restored = LineSeg3d::deserialize(&bytes[..]).unwrap();
+        assert_eq!(restored.from, line.from);
+        assert_eq!(restored.to, line.to);
     }
 }
