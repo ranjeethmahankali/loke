@@ -2954,7 +2954,7 @@ mod test {
     }
 
     #[test]
-    fn t_arc_serialize_deserialize_roundtrip() {
+    fn t_serialize_deserialize_roundtrip() {
         let arc = Arc3d::from_three_points(
             DVec([-1.0, 0.0, 0.0]),
             DVec([0.0, 1.0, 0.0]),
@@ -2964,6 +2964,59 @@ mod test {
         let mut bytes = Vec::new();
         arc.serialize(&mut bytes).unwrap();
         let restored = Arc3d::deserialize(&bytes[..]).unwrap();
+        assert_eq!(restored.center, arc.center);
+        assert_eq!(restored.start_dir, arc.start_dir);
+        assert_eq!(restored.mid_dir, arc.mid_dir);
+        assert_eq!(restored.end_dir, arc.end_dir);
+        assert_eq!(restored.radius, arc.radius);
+        assert_eq!(restored.angle, arc.angle);
+    }
+
+    #[test]
+    fn t_serialize_deserialize_2d() {
+        let arc = Arc2d::unit_quadrant_arc(1);
+        let mut bytes = Vec::new();
+        arc.serialize(&mut bytes).unwrap();
+        let restored = Arc2d::deserialize(&bytes[..]).unwrap();
+        assert_eq!(restored.center, arc.center);
+        assert_eq!(restored.start_dir, arc.start_dir);
+        assert_eq!(restored.mid_dir, arc.mid_dir);
+        assert_eq!(restored.end_dir, arc.end_dir);
+        assert_eq!(restored.radius, arc.radius);
+        assert_eq!(restored.angle, arc.angle);
+    }
+
+    #[test]
+    fn t_serialize_deserialize_major_arc() {
+        // Arc3d going the long way (> π) from (1,0,0) through (0,-1,0) to (-1,0,0).
+        let arc = Arc3d::from_three_points(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([0.0, -1.0, 0.0]),
+            DVec([-1.0, 0.0, 0.0]),
+        )
+        .unwrap();
+        let mut bytes = Vec::new();
+        arc.serialize(&mut bytes).unwrap();
+        let restored = Arc3d::deserialize(&bytes[..]).unwrap();
+        assert_eq!(restored.center, arc.center);
+        assert_eq!(restored.start_dir, arc.start_dir);
+        assert_eq!(restored.mid_dir, arc.mid_dir);
+        assert_eq!(restored.end_dir, arc.end_dir);
+        assert_eq!(restored.radius, arc.radius);
+        assert_eq!(restored.angle, arc.angle);
+    }
+
+    #[test]
+    fn t_serialize_deserialize_f32() {
+        let arc = Arc3f::from_three_points(
+            crate::Vec([-1.0, 0.0, 0.0]),
+            crate::Vec([0.0, 1.0, 0.0]),
+            crate::Vec([1.0, 0.0, 0.0]),
+        )
+        .unwrap();
+        let mut bytes = Vec::new();
+        arc.serialize(&mut bytes).unwrap();
+        let restored = Arc3f::deserialize(&bytes[..]).unwrap();
         assert_eq!(restored.center, arc.center);
         assert_eq!(restored.start_dir, arc.start_dir);
         assert_eq!(restored.mid_dir, arc.mid_dir);

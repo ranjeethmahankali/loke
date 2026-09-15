@@ -2839,4 +2839,67 @@ mod test {
         assert_eq!(restored.degree(), spline.degree());
         assert_eq!(restored.domain(), spline.domain());
     }
+
+    #[test]
+    fn t_serialize_deserialize_linear() {
+        let spline = make_clamped(
+            &[vec3(0., 0., 0.), vec3(1., 3., 0.), vec3(3., 1., 0.)],
+            1,
+        );
+        let mut bytes = Vec::new();
+        spline.serialize(&mut bytes).unwrap();
+        let restored = Spline3d::deserialize(&bytes[..]).unwrap();
+        assert_eq!(restored.knots, spline.knots);
+        assert_eq!(restored.control_points, spline.control_points);
+        assert_eq!(restored.unique_knots, spline.unique_knots);
+        assert_eq!(restored.power_basis_coeff, spline.power_basis_coeff);
+        assert_eq!(restored.degree(), spline.degree());
+        assert_eq!(restored.domain(), spline.domain());
+    }
+
+    #[test]
+    fn t_serialize_deserialize_2d() {
+        let spline = Spline2d::create_clamped(
+            &[
+                DVec([0., 0.]),
+                DVec([1., 2.]),
+                DVec([2., 0.]),
+                DVec([3., 2.]),
+            ],
+            2,
+        )
+        .unwrap();
+        let mut bytes = Vec::new();
+        spline.serialize(&mut bytes).unwrap();
+        let restored = Spline2d::deserialize(&bytes[..]).unwrap();
+        assert_eq!(restored.knots, spline.knots);
+        assert_eq!(restored.control_points, spline.control_points);
+        assert_eq!(restored.unique_knots, spline.unique_knots);
+        assert_eq!(restored.power_basis_coeff, spline.power_basis_coeff);
+        assert_eq!(restored.degree(), spline.degree());
+        assert_eq!(restored.domain(), spline.domain());
+    }
+
+    #[test]
+    fn t_serialize_deserialize_f32() {
+        let spline = Spline3f::create_clamped(
+            &[
+                crate::Vec([0., 0., 0.]),
+                crate::Vec([1., 2., -1.]),
+                crate::Vec([2., -3., 4.]),
+                crate::Vec([3., 5., -2.]),
+            ],
+            3,
+        )
+        .unwrap();
+        let mut bytes = Vec::new();
+        spline.serialize(&mut bytes).unwrap();
+        let restored = Spline3f::deserialize(&bytes[..]).unwrap();
+        assert_eq!(restored.knots, spline.knots);
+        assert_eq!(restored.control_points, spline.control_points);
+        assert_eq!(restored.unique_knots, spline.unique_knots);
+        assert_eq!(restored.power_basis_coeff, spline.power_basis_coeff);
+        assert_eq!(restored.degree(), spline.degree());
+        assert_eq!(restored.domain(), spline.domain());
+    }
 }

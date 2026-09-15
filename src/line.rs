@@ -181,7 +181,7 @@ mod test {
     use crate::DVec;
 
     #[test]
-    fn length_and_domain() {
+    fn t_length_and_domain() {
         let line = LineSeg3d::create(DVec([1.0, 0.0, 0.0]), DVec([4.0, 0.0, 0.0]));
         assert!((line.length() - 3.0).abs() < 1e-12);
         let (lo, hi) = line.domain();
@@ -190,14 +190,14 @@ mod test {
     }
 
     #[test]
-    fn endpoints() {
+    fn t_endpoints() {
         let line = LineSeg3d::create(DVec([1.0, 0.0, 0.0]), DVec([4.0, 0.0, 0.0]));
         assert_eq!(line.start(), DVec([1.0, 0.0, 0.0]));
         assert_eq!(line.end(), DVec([4.0, 0.0, 0.0]));
     }
 
     #[test]
-    fn point_at_endpoints_and_midpoint() {
+    fn t_point_at_endpoints_and_midpoint() {
         let line = LineSeg3d::create(DVec([1.0, 0.0, 0.0]), DVec([4.0, 0.0, 0.0]));
         let len = line.length();
         let p0 = line.point(0.0).unwrap();
@@ -209,14 +209,14 @@ mod test {
     }
 
     #[test]
-    fn point_out_of_range() {
+    fn t_point_out_of_range() {
         let line = LineSeg3d::create(DVec([1.0, 0.0, 0.0]), DVec([4.0, 0.0, 0.0]));
         assert!(line.point(-0.001).is_none());
         assert!(line.point(line.length() + 0.001).is_none());
     }
 
     #[test]
-    fn tangent_is_unit_and_constant() {
+    fn t_tangent_is_unit_and_constant() {
         let line = LineSeg3d::create(DVec([0.0, 0.0, 0.0]), DVec([3.0, 4.0, 0.0]));
         let len = line.length();
         assert!((len - 5.0).abs() < 1e-12);
@@ -228,14 +228,14 @@ mod test {
     }
 
     #[test]
-    fn tangent_out_of_range() {
+    fn t_tangent_out_of_range() {
         let line = LineSeg3d::create(DVec([1.0, 0.0, 0.0]), DVec([4.0, 0.0, 0.0]));
         assert!(line.tangent(-0.001).is_none());
         assert!(line.tangent(line.length() + 0.001).is_none());
     }
 
     #[test]
-    fn point_with_derivs_matches_point_and_tangent() {
+    fn t_point_with_derivs_matches_point_and_tangent() {
         let line = LineSeg3d::create(DVec([1.0, 2.0, 3.0]), DVec([4.0, 6.0, 3.0]));
         let len = line.length();
         let mut results = [DVec([0.0; 3]); 4];
@@ -253,7 +253,7 @@ mod test {
     }
 
     #[test]
-    fn point_with_derivs_out_of_range() {
+    fn t_point_with_derivs_out_of_range() {
         let line = LineSeg3d::create(DVec([1.0, 0.0, 0.0]), DVec([4.0, 0.0, 0.0]));
         let mut results = [DVec([0.0; 3]); 2];
         assert!(line.point_with_derivs(-0.001, &mut results).is_err());
@@ -264,7 +264,7 @@ mod test {
     }
 
     #[test]
-    fn reversed() {
+    fn t_reversed() {
         let line = LineSeg3d::create(DVec([1.0, 0.0, 0.0]), DVec([4.0, 0.0, 0.0]));
         let rev = line.reversed();
         assert_eq!(rev.start(), line.end());
@@ -280,7 +280,7 @@ mod test {
     }
 
     #[test]
-    fn bounds() {
+    fn t_bounds() {
         let line = LineSeg3d::create(DVec([3.0, -1.0, 5.0]), DVec([1.0, 2.0, -3.0]));
         let (lo, hi) = line.bounds();
         assert_eq!(lo, DVec([1.0, -1.0, -3.0]));
@@ -288,7 +288,7 @@ mod test {
     }
 
     #[test]
-    fn uniform_samples_positions() {
+    fn t_uniform_samples_positions() {
         let line = LineSeg3d::create(DVec([0.0, 0.0, 0.0]), DVec([10.0, 0.0, 0.0]));
         // start=0, step=2 → 6 points at x = 0, 2, 4, 6, 8, 10.
         let pts: Vec<_> = line.uniform_samples(0.0, 2.0, 1e-6).collect();
@@ -318,7 +318,7 @@ mod test {
     }
 
     #[test]
-    fn uniform_samples_edge_cases() {
+    fn t_uniform_samples_edge_cases() {
         let line = LineSeg3d::create(DVec([0.0, 0.0, 0.0]), DVec([5.0, 0.0, 0.0]));
         // start > len → 0 points.
         assert_eq!(line.uniform_samples(6.0, 1.0, 1e-6).count(), 0);
@@ -345,7 +345,7 @@ mod test {
     }
 
     #[test]
-    fn adaptive_samples() {
+    fn t_adaptive_samples() {
         let line = LineSeg3d::create(DVec([1.0, 0.0, 0.0]), DVec([4.0, 0.0, 0.0]));
         let samples: Vec<_> = line.adaptive_samples().collect();
         assert_eq!(samples.len(), 2);
@@ -354,7 +354,7 @@ mod test {
     }
 
     #[test]
-    fn degenerate_zero_length() {
+    fn t_degenerate_zero_length() {
         let line = LineSeg3d::create(DVec([5.0, 5.0, 5.0]), DVec([5.0, 5.0, 5.0]));
         assert!(line.length() < 1e-12);
         let p = line.point(0.0).unwrap();
@@ -368,7 +368,7 @@ mod test {
     }
 
     #[test]
-    fn diagonal_3d() {
+    fn t_diagonal_3d() {
         let line = LineSeg3d::create(DVec([0.0, 0.0, 0.0]), DVec([1.0, 1.0, 1.0]));
         let expected_len = 3.0_f64.sqrt();
         assert!((line.length() - expected_len).abs() < 1e-12);
@@ -377,7 +377,7 @@ mod test {
     }
 
     #[test]
-    fn curvature_zero_everywhere_none_outside() {
+    fn t_curvature_zero_everywhere_none_outside() {
         let line = LineSeg3d::create(DVec([1.0, 2.0, 3.0]), DVec([4.0, 6.0, 3.0]));
         let len = line.length();
         assert_eq!(line.curvature(0.0), Some(DVec([0.0; 3])));
@@ -388,7 +388,7 @@ mod test {
     }
 
     #[test]
-    fn is_closed() {
+    fn t_is_closed() {
         let open = LineSeg3d::create(DVec([0.0, 0.0, 0.0]), DVec([1.0, 0.0, 0.0]));
         assert!(!open.is_closed());
         // A zero-length line (same point for both endpoints) is closed.
@@ -404,5 +404,36 @@ mod test {
         let restored = LineSeg3d::deserialize(&bytes[..]).unwrap();
         assert_eq!(restored.from, line.from);
         assert_eq!(restored.to, line.to);
+    }
+
+    #[test]
+    fn t_serialize_deserialize_roundtrip_2d() {
+        let line = LineSeg2d::create(DVec([1.0, 2.0]), DVec([-4.0, 5.0]));
+        let mut bytes = Vec::new();
+        line.serialize(&mut bytes).unwrap();
+        let restored = LineSeg2d::deserialize(&bytes[..]).unwrap();
+        assert_eq!(restored.from, line.from);
+        assert_eq!(restored.to, line.to);
+    }
+
+    #[test]
+    fn t_serialize_deserialize_roundtrip_f32() {
+        let line = LineSeg3f::create(crate::Vec([1.0, 2.0, 3.0]), crate::Vec([-4.0, 5.0, -6.0]));
+        let mut bytes = Vec::new();
+        line.serialize(&mut bytes).unwrap();
+        let restored = LineSeg3f::deserialize(&bytes[..]).unwrap();
+        assert_eq!(restored.from, line.from);
+        assert_eq!(restored.to, line.to);
+    }
+
+    #[test]
+    fn t_serialize_deserialize_zero_length() {
+        let line = LineSeg3d::create(DVec([5.0, 5.0, 5.0]), DVec([5.0, 5.0, 5.0]));
+        let mut bytes = Vec::new();
+        line.serialize(&mut bytes).unwrap();
+        let restored = LineSeg3d::deserialize(&bytes[..]).unwrap();
+        assert_eq!(restored.from, line.from);
+        assert_eq!(restored.to, line.to);
+        assert!(restored.is_closed());
     }
 }
