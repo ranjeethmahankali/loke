@@ -1,4 +1,4 @@
-use crate::{Adaptor, ScalarAdaptor, TrigonometryAdaptor};
+use crate::{Adaptor, ScalarAdaptor, SerialAdaptor, TrigonometryAdaptor};
 use std::ops::{
     Add, AddAssign, Div, DivAssign, Index, IndexMut, Mul, MulAssign, Neg, Sub, SubAssign,
 };
@@ -515,6 +515,20 @@ impl<const DIM: usize> Adaptor<DIM> for F64Adaptor {
     }
 }
 
+impl SerialAdaptor for F64Adaptor {
+    type Value = f64;
+
+    #[inline(always)]
+    fn write(val: Self::Value, w: impl std::io::Write) -> Result<(), std::io::Error> {
+        <f64 as SerialAdaptor>::write(val, w)
+    }
+
+    #[inline(always)]
+    fn read(src: impl std::io::Read) -> Result<Self::Value, std::io::Error> {
+        <f64 as SerialAdaptor>::read(src)
+    }
+}
+
 impl<const DIM: usize> Adaptor<DIM> for F32Adaptor {
     type Vector = Vec<DIM>;
     type Scalar = f32;
@@ -557,5 +571,19 @@ impl<const DIM: usize> Adaptor<DIM> for F32Adaptor {
     #[inline(always)]
     fn coord_arr(v: Self::Vector) -> [Self::Scalar; DIM] {
         v.0
+    }
+}
+
+impl SerialAdaptor for F32Adaptor {
+    type Value = f32;
+
+    #[inline(always)]
+    fn write(val: Self::Value, w: impl std::io::Write) -> Result<(), std::io::Error> {
+        <f32 as SerialAdaptor>::write(val, w)
+    }
+
+    #[inline(always)]
+    fn read(src: impl std::io::Read) -> Result<Self::Value, std::io::Error> {
+        <f32 as SerialAdaptor>::read(src)
     }
 }
