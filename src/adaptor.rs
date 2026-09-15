@@ -80,6 +80,14 @@ pub trait Adaptor<const DIM: usize>: Clone + ScalarAdaptor<Float = Self::Scalar>
     fn coord_arr(v: Self::Vector) -> [Self::Scalar; DIM];
 }
 
+/// Functions to serialize/deserialize scalars.
+pub trait SerialAdaptor {
+    type Value;
+
+    fn write(val: Self::Value, w: impl std::io::Write) -> Result<(), std::io::Error>;
+    fn read(src: impl std::io::Read) -> Result<Self::Value, std::io::Error>;
+}
+
 // Helper implementations for types:
 
 impl<T> ScalarTraits for T where
@@ -116,3 +124,27 @@ impl<T> VectorTraits for T where
         + Neg<Output = Self>
 {
 }
+
+macro_rules! impl_serial_adaptor {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl SerialAdaptor for $ty {
+                type Value = $ty;
+
+                fn write(val: Self::Value, mut w: impl std::io::Write) -> Result<(), std::io::Error> {
+                    w.write_all(&val.to_ne_bytes())
+                }
+
+                fn read(mut src: impl std::io::Read) -> Result<Self::Value, std::io::Error> {
+                    let mut buf = [0u8; std::mem::size_of::<$ty>()];
+                    src.read_exact(&mut buf)?;
+                    Ok(<$ty>::from_ne_bytes(buf))
+                }
+            }
+        )*
+    };
+}
+
+impl_serial_adaptor!(
+    f32, f64, u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize,
+);

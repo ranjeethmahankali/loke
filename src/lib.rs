@@ -6,7 +6,7 @@ mod polynomial;
 mod spline;
 mod vec;
 
-pub use adaptor::{Adaptor, ScalarAdaptor, TrigonometryAdaptor};
+pub use adaptor::{Adaptor, ScalarAdaptor, SerialAdaptor, TrigonometryAdaptor};
 pub use arc::{
     Arc, Arc2d, Arc2f, Arc3d, Arc3f, EllipticArc, EllipticArc2d, EllipticArc2f, EllipticArc3d,
     EllipticArc3f,
