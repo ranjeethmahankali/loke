@@ -1,4 +1,4 @@
-use crate::{Adaptor, Error, F32Adaptor, F64Adaptor};
+use crate::{Adaptor, Error, F32Adaptor, F64Adaptor, SerialAdaptor};
 
 pub struct LineSeg<const DIM: usize, A: Adaptor<DIM>> {
     from: A::Vector,
@@ -141,6 +141,24 @@ impl<const DIM: usize, A: Adaptor<DIM>> LineSeg<DIM, A> {
 
     pub fn is_closed(&self) -> bool {
         self.from == self.to
+    }
+
+    pub fn serialize(&self, w: impl std::io::Write) -> Result<(), std::io::Error>
+    where
+        A: SerialAdaptor,
+    {
+        // Write n_knots, then n_control_points as a 64 bit integer each.  Then write n_knots
+        // scalars via the serial adaptor.  Then write DIM x n_control_points scalars (all coords of
+        // one vector one after another in x, y, z, x, y, z, pattern except dimension agnostic).
+        todo!()
+    }
+
+    pub fn deserialize(src: impl std::io::Read) -> Result<Self, std::io::Error>
+    where
+        A: SerialAdaptor,
+    {
+        // Deserialize the same order what was written out by serialize.
+        todo!()
     }
 }
 

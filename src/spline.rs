@@ -1,4 +1,4 @@
-use crate::{Adaptor, Error, F32Adaptor, F64Adaptor, ScalarAdaptor, polynomial};
+use crate::{Adaptor, Error, F32Adaptor, F64Adaptor, ScalarAdaptor, SerialAdaptor, polynomial};
 use std::{
     cell::RefCell,
     ops::{Index, IndexMut},
@@ -335,6 +335,24 @@ where
         let n_coeff = self.degree() + 1;
         let offset = (n_coeff * n_segs * coord) + (n_coeff * segment);
         &self.power_basis_coeff[offset..(offset + n_coeff)]
+    }
+
+    pub fn serialize(&self, w: impl std::io::Write) -> Result<(), std::io::Error>
+    where
+        A: SerialAdaptor,
+    {
+        // Write n_knots, then n_control_points as a 64 bit integer each.  Then write n_knots
+        // scalars via the serial adaptor.  Then write DIM x n_control_points scalars (all coords of
+        // one vector one after another in x, y, z, x, y, z, pattern except dimension agnostic).
+        todo!()
+    }
+
+    pub fn deserialize(src: impl std::io::Read) -> Result<Self, std::io::Error>
+    where
+        A: SerialAdaptor,
+    {
+        // Deserialize the same order what was written out by serialize.
+        todo!()
     }
 }
 
@@ -2727,10 +2745,7 @@ mod test {
     fn t_curvature_quadratic_constant_second_derivative() {
         // Quadratic Bezier with p0=(0,0,0), p1=(0.5,1,0), p2=(1,0,0).
         // P(t) = (t, 2t-2t², 0), so P''(t) = (0,-4,0) everywhere.
-        let spline = make_clamped(
-            &[vec3(0., 0., 0.), vec3(0.5, 1., 0.), vec3(1., 0., 0.)],
-            2,
-        );
+        let spline = make_clamped(&[vec3(0., 0., 0.), vec3(0.5, 1., 0.), vec3(1., 0., 0.)], 2);
         let expected = vec3(0., -4., 0.);
         let (lo, hi) = spline.domain();
         for i in 0..=4 {
@@ -2748,10 +2763,7 @@ mod test {
     #[test]
     fn t_is_closed() {
         // Open spline: first and last control points differ.
-        let open = make_clamped(
-            &[vec3(0., 0., 0.), vec3(1., 1., 0.), vec3(2., 0., 0.)],
-            2,
-        );
+        let open = make_clamped(&[vec3(0., 0., 0.), vec3(1., 1., 0.), vec3(2., 0., 0.)], 2);
         assert!(!open.is_closed());
 
         // Closed spline: first and last control points are identical.
