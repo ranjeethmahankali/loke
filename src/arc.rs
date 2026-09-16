@@ -4,7 +4,7 @@ use crate::{
     vec::{F32Adaptor, F64Adaptor},
 };
 use core::f64;
-use std::f64::consts::{FRAC_1_SQRT_2, FRAC_PI_2, FRAC_PI_4, PI, TAU};
+use std::f64::consts::{FRAC_1_SQRT_2, FRAC_PI_2, PI, TAU};
 
 pub type Arc2d = Arc<2, F64Adaptor>;
 pub type Arc3d = Arc<3, F64Adaptor>;
@@ -410,14 +410,7 @@ where
     A: Adaptor<DIM>,
 {
     /// A unit-radius quarter arc at the origin, swept from the first axis
-    /// toward the second (all higher axes zero). Every constructor on `Arc`
-    /// is fallible (collinear points, zero radius, full-circle sweep, ...),
-    /// so there's no "empty" value to fall back on: `radius = 0` or
-    /// `angle = 0` would satisfy no downstream invariant, since `length`,
-    /// `tangent`, and `point_with_derivs` all divide by `radius`/`angle`
-    /// without an epsilon guard, so a literal zero would silently produce
-    /// NaNs instead of a well-formed arc. This mirrors quadrant 0 of
-    /// `unit_quadrant_arc`, generalized to arbitrary `DIM`.
+    /// toward the second (all higher axes zero).
     fn default() -> Self {
         // An arc needs a 2-plane to sweep in: below that, `end_dir` can't be
         // a unit vector distinct from `start_dir` (this is also why every

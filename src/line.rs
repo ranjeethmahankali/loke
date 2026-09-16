@@ -175,6 +175,16 @@ impl<const DIM: usize, A: Adaptor<DIM>> LineSeg<DIM, A> {
     }
 }
 
+impl<const DIM: usize, A: Adaptor<DIM>> Default for LineSeg<DIM, A> {
+    /// The unit segment from the origin to 1 on the first axis.
+    fn default() -> Self {
+        LineSeg {
+            from: A::zero_vector(),
+            to: A::vector(std::array::from_fn(|i| A::scalar(if i == 0 { 1.0 } else { 0.0 }))),
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -435,5 +445,13 @@ mod test {
         assert_eq!(restored.from, line.from);
         assert_eq!(restored.to, line.to);
         assert!(restored.is_closed());
+    }
+
+    #[test]
+    fn t_default_is_unit_segment_on_first_axis() {
+        let line = LineSeg3d::default();
+        assert_eq!(line.start(), DVec([0.0, 0.0, 0.0]));
+        assert_eq!(line.end(), DVec([1.0, 0.0, 0.0]));
+        assert!((line.length() - 1.0).abs() < 1e-12);
     }
 }

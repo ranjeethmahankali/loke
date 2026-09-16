@@ -393,6 +393,18 @@ where
     }
 }
 
+impl<const DIM: usize, A> Default for Spline<DIM, A>
+where
+    A: Adaptor<DIM>,
+{
+    /// A degree-1 spline (a straight line) from the origin to 1 on the first axis.
+    fn default() -> Self {
+        let end = A::vector(std::array::from_fn(|i| A::scalar(if i == 0 { 1.0 } else { 0.0 })));
+        Self::create_clamped([A::zero_vector(), end], 1)
+            .expect("a degree-1 spline with 2 control points is always valid")
+    }
+}
+
 fn curvature_adjusted_arc_length<const DIM: usize, A: Adaptor<DIM>>(
     prev_pt: A::Vector,
     next_pt: A::Vector,
@@ -2898,5 +2910,14 @@ mod test {
         assert_eq!(restored.power_basis_coeff, spline.power_basis_coeff);
         assert_eq!(restored.degree(), spline.degree());
         assert_eq!(restored.domain(), spline.domain());
+    }
+
+    #[test]
+    fn t_default_is_degree_1_unit_line_on_first_axis() {
+        let spline = Spline3d::default();
+        assert_eq!(spline.degree(), 1);
+        assert_eq!(spline.start(), vec3(0., 0., 0.));
+        assert_eq!(spline.end(), vec3(1., 0., 0.));
+        assert_eq!(spline.domain(), (0.0, 1.0));
     }
 }
