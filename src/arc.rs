@@ -4,7 +4,7 @@ use crate::{
     vec::{F32Adaptor, F64Adaptor},
 };
 use core::f64;
-use std::f64::consts::{FRAC_PI_4, PI, TAU};
+use std::f64::consts::{FRAC_1_SQRT_2, FRAC_PI_2, FRAC_PI_4, PI, TAU};
 
 pub type Arc2d = Arc<2, F64Adaptor>;
 pub type Arc3d = Arc<3, F64Adaptor>;
@@ -39,49 +39,6 @@ where
     mid_vec: A::Vector,   // Vector from center toward midpoint (used for antipodal SLERP).
     end_vec: A::Vector,   // Vector from center toward end.
     angle: A::Scalar,     // Sweep angle from start_vec to end_vec, through mid_vec.
-}
-
-impl<A> Arc<2, A>
-where
-    A: Adaptor<2>,
-{
-    pub fn unit_quadrant_arc(quadrant: u8) -> Self {
-        let quadrant = quadrant % 4;
-        match quadrant {
-            0 => Self {
-                center: A::zero_vector(),
-                start_dir: A::vector([A::scalar(1.0), A::scalar(0.0)]),
-                mid_dir: A::normalize(A::vector([A::scalar(1.0), A::scalar(1.0)])),
-                end_dir: A::vector([A::scalar(0.0), A::scalar(1.0)]),
-                radius: A::scalar(1.0),
-                angle: A::scalar(FRAC_PI_4),
-            },
-            1 => Self {
-                center: A::zero_vector(),
-                start_dir: A::vector([A::scalar(0.0), A::scalar(1.0)]),
-                mid_dir: A::normalize(A::vector([A::scalar(-1.0), A::scalar(1.0)])),
-                end_dir: A::vector([A::scalar(-1.0), A::scalar(0.0)]),
-                radius: A::scalar(1.0),
-                angle: A::scalar(FRAC_PI_4),
-            },
-            2 => Self {
-                center: A::zero_vector(),
-                start_dir: A::vector([A::scalar(-1.0), A::scalar(0.0)]),
-                mid_dir: A::normalize(A::vector([A::scalar(-1.0), A::scalar(-1.0)])),
-                end_dir: A::vector([A::scalar(0.0), A::scalar(-1.0)]),
-                radius: A::scalar(1.0),
-                angle: A::scalar(FRAC_PI_4),
-            },
-            _ => Self {
-                center: A::zero_vector(),
-                start_dir: A::vector([A::scalar(0.0), A::scalar(-1.0)]),
-                mid_dir: A::normalize(A::vector([A::scalar(1.0), A::scalar(-1.0)])),
-                end_dir: A::vector([A::scalar(1.0), A::scalar(0.0)]),
-                radius: A::scalar(1.0),
-                angle: A::scalar(FRAC_PI_4),
-            },
-        }
-    }
 }
 
 impl<const DIM: usize, A> Arc<DIM, A>
@@ -445,6 +402,44 @@ where
             radius,
             angle,
         })
+    }
+}
+
+impl<const DIM: usize, A> Default for Arc<DIM, A>
+where
+    A: Adaptor<DIM>,
+{
+    /// A unit-radius quarter arc at the origin, swept from the first axis
+    /// toward the second (all higher axes zero). Every constructor on `Arc`
+    /// is fallible (collinear points, zero radius, full-circle sweep, ...),
+    /// so there's no "empty" value to fall back on: `radius = 0` or
+    /// `angle = 0` would satisfy no downstream invariant, since `length`,
+    /// `tangent`, and `point_with_derivs` all divide by `radius`/`angle`
+    /// without an epsilon guard, so a literal zero would silently produce
+    /// NaNs instead of a well-formed arc. This mirrors quadrant 0 of
+    /// `unit_quadrant_arc`, generalized to arbitrary `DIM`.
+    fn default() -> Self {
+        // An arc needs a 2-plane to sweep in: below that, `end_dir` can't be
+        // a unit vector distinct from `start_dir` (this is also why every
+        // fallible constructor, e.g. `from_three_points`, can only ever
+        // return `Error::PointsCollinear` for `DIM < 2`).
+        const {
+            assert!(DIM >= 2, "Arc<DIM, A>::default() requires DIM >= 2");
+        }
+        Arc {
+            center: A::zero_vector(),
+            start_dir: A::vector(std::array::from_fn(|i| {
+                A::scalar(if i == 0 { 1.0 } else { 0.0 })
+            })),
+            mid_dir: A::vector(std::array::from_fn(|i| {
+                A::scalar(if i < 2 { FRAC_1_SQRT_2 } else { 0.0 })
+            })),
+            end_dir: A::vector(std::array::from_fn(|i| {
+                A::scalar(if i == 1 { 1.0 } else { 0.0 })
+            })),
+            radius: A::scalar(1.0),
+            angle: A::scalar(FRAC_PI_2),
+        }
     }
 }
 
@@ -2974,7 +2969,7 @@ mod test {
 
     #[test]
     fn t_serialize_deserialize_2d() {
-        let arc = Arc2d::unit_quadrant_arc(1);
+        let arc = Arc2d::default();
         let mut bytes = Vec::new();
         arc.serialize(&mut bytes).unwrap();
         let restored = Arc2d::deserialize(&bytes[..]).unwrap();
@@ -3023,5 +3018,23 @@ mod test {
         assert_eq!(restored.end_dir, arc.end_dir);
         assert_eq!(restored.radius, arc.radius);
         assert_eq!(restored.angle, arc.angle);
+    }
+
+    #[test]
+    fn t_default_evaluates_without_nan() {
+        // The default must be a genuinely usable arc, not a degenerate
+        // placeholder: every method should produce finite, sensible values.
+        let arc = Arc3d::default();
+        let len = arc.length();
+        assert!(len.is_finite() && len > 0.0);
+        for i in 0..=4 {
+            let t = len * i as f64 / 4.0;
+            let p = arc.point(t).unwrap();
+            assert!(p[0].is_finite() && p[1].is_finite() && p[2].is_finite());
+            let tan = arc.tangent(t).unwrap();
+            assert!((tan.length() - 1.0).abs() < 1e-10);
+        }
+        assert_eq!(arc.start(), DVec([1.0, 0.0, 0.0]));
+        assert_eq!(arc.end(), DVec([0.0, 1.0, 0.0]));
     }
 }
