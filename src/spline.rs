@@ -103,6 +103,10 @@ where
         &self.control_points
     }
 
+    pub fn knots(&self) -> &[A::Scalar] {
+        &self.knots
+    }
+
     pub fn domain(&self) -> (A::Scalar, A::Scalar) {
         let degree = self.degree();
         (
@@ -399,7 +403,9 @@ where
 {
     /// A degree-1 spline (a straight line) from the origin to 1 on the first axis.
     fn default() -> Self {
-        let end = A::vector(std::array::from_fn(|i| A::scalar(if i == 0 { 1.0 } else { 0.0 })));
+        let end = A::vector(std::array::from_fn(|i| {
+            A::scalar(if i == 0 { 1.0 } else { 0.0 })
+        }));
         Self::create_clamped([A::zero_vector(), end], 1)
             .expect("a degree-1 spline with 2 control points is always valid")
     }
