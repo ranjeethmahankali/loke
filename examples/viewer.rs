@@ -254,11 +254,13 @@ const ERROR_PROBES: usize = 16;
 
 // ---------- Scene trait ----------
 
-/// Guide geometry: the rectangle `center ± half_u ± half_v`.
+/// Guide geometry: the rectangle `center ± half_u ± half_v`, and the normal as the
+/// segment from `center` to `center + normal`.
 struct GuidePlane {
     center: Vec3,
     half_u: Vec3,
     half_v: Vec3,
+    normal: Vec3,
 }
 
 trait Scene {
@@ -576,6 +578,13 @@ impl<S: Scene> App<S> {
                         arc_len: 0.0,
                     }),
                 );
+            self.line_strips.push(start..self.vertices.len() as u32);
+            let start = self.vertices.len() as u32;
+            self.vertices.extend([c, c + plane.normal].map(|p| Vertex {
+                pos: p.into(),
+                color: PLANE_COLOR,
+                arc_len: 0.0,
+            }));
             self.line_strips.push(start..self.vertices.len() as u32);
         }
 
@@ -1498,7 +1507,8 @@ impl Scene for CurveScene {
         // The plane only depends on its own two widgets. The source arc is drawn too, so
         // the projection can be compared against it.
         planes.clear();
-        let (origin, normal) = (inputs[23], (inputs[24] - inputs[23]).normalize_or_zero());
+        let origin = inputs[23];
+        let normal = (inputs[24] - origin).normalize_or_zero();
         if normal != Vec3::ZERO {
             // One side along world X projected onto the plane (Y if X is the normal), so
             // the rectangle does not spin while dragging.
@@ -1509,6 +1519,7 @@ impl Scene for CurveScene {
                 center: origin,
                 half_u: u * PLANE_HALF_SIZE,
                 half_v: normal.cross(u) * PLANE_HALF_SIZE,
+                normal: inputs[24] - origin,
             });
         }
         if let Ok(arc) = Arc::from_three_points(inputs[20], inputs[21], inputs[22]) {
