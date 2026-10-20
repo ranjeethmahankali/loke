@@ -242,6 +242,8 @@ const POINT_COLOR: [f32; 4] = [1.0, 0.4, 0.1, 1.0];
 const INPUT_POINT_COLOR: [f32; 4] = [0.8, 0.8, 0.75, 1.0];
 const ELLIPSE_COLOR: [f32; 4] = [0.3, 0.85, 0.95, 1.0];
 const SAMPLE_COLOR: [f32; 4] = [0.95, 0.85, 0.2, 1.0];
+const PLANE_COLOR: [f32; 4] = [0.85, 0.45, 0.85, 0.6];
+const PLANE_HALF_SIZE: f32 = 2.5;
 
 const DEFAULT_TOLERANCE: f32 = 0.001;
 /// Repetitions of `adaptive_samples` per curve when timing, so the timer resolution is
@@ -252,6 +254,13 @@ const ERROR_PROBES: usize = 16;
 
 // ---------- Scene trait ----------
 
+/// Guide geometry: the rectangle `center ± half_u ± half_v`.
+struct GuidePlane {
+    center: Vec3,
+    half_u: Vec3,
+    half_v: Vec3,
+}
+
 trait Scene {
     fn init() -> Box<[Vec3]>;
     fn update(
@@ -259,6 +268,7 @@ trait Scene {
         splines: &mut Vec<Spline>,
         arcs: &mut Vec<Arc>,
         ellipses: &mut Vec<EllipticArc>,
+        planes: &mut Vec<GuidePlane>,
         points: &mut Vec<Vec3>,
     );
 }
@@ -383,6 +393,7 @@ struct App<S: Scene> {
     out_splines: Vec<Spline>,
     out_arcs: Vec<Arc>,
     out_ellipses: Vec<EllipticArc>,
+    out_planes: Vec<GuidePlane>,
     out_points: Vec<Vec3>,
     // Sampling
     tolerance: f32,
@@ -413,12 +424,14 @@ impl<S: Scene> App<S> {
         let mut out_splines = Vec::new();
         let mut out_arcs = Vec::new();
         let mut out_ellipses = Vec::new();
+        let mut out_planes = Vec::new();
         let mut out_points = Vec::new();
         S::update(
             &inputs,
             &mut out_splines,
             &mut out_arcs,
             &mut out_ellipses,
+            &mut out_planes,
             &mut out_points,
         );
 
@@ -438,6 +451,7 @@ impl<S: Scene> App<S> {
             out_splines,
             out_arcs,
             out_ellipses,
+            out_planes,
             out_points,
             tolerance: DEFAULT_TOLERANCE,
             show_samples: false,
@@ -548,6 +562,21 @@ impl<S: Scene> App<S> {
                 .push(start as u32..self.vertices.len() as u32);
             let (min, max) = earc.bounds();
             rebuild_bbox(min, max, &mut self.vertices, &mut self.line_strips);
+        }
+
+        // Guide planes, as closed rectangles.
+        for plane in &self.out_planes {
+            let start = self.vertices.len() as u32;
+            let (c, u, v) = (plane.center, plane.half_u, plane.half_v);
+            self.vertices
+                .extend(
+                    [c - u - v, c + u - v, c + u + v, c - u + v, c - u - v].map(|p| Vertex {
+                        pos: p.into(),
+                        color: PLANE_COLOR,
+                        arc_len: 0.0,
+                    }),
+                );
+            self.line_strips.push(start..self.vertices.len() as u32);
         }
 
         // Timing, with a reused buffer so allocation is not measured.
@@ -721,6 +750,7 @@ impl<S: Scene> App<S> {
             &mut self.out_splines,
             &mut self.out_arcs,
             &mut self.out_ellipses,
+            &mut self.out_planes,
             &mut self.out_points,
         );
         self.rebuild_geometry();
@@ -1413,12 +1443,12 @@ impl Scene for CurveScene {
             Vec3::new(3.5, -5.0, 0.0), // center
             Vec3::new(5.5, -4.4, 0.0), // start
             Vec3::new(3.0, -3.2, 0.0), // end
-            // Elliptic arc - a three-point arc projected onto the plane through its
-            // center, with the normal pointing from the center toward the last point.
+            // Elliptic arc - a three-point arc projected onto a plane.
             Vec3::new(7.5, -5.0, 0.0),  // start
             Vec3::new(9.0, -3.5, 0.0),  // middle
             Vec3::new(10.5, -5.0, 0.0), // end
-            Vec3::new(10.0, -4.5, 1.2), // normal tip
+            Vec3::new(9.0, -5.0, -1.0), // plane origin
+            Vec3::new(10.0, -4.5, 0.2), // plane normal tip
         ])
     }
 
@@ -1427,6 +1457,7 @@ impl Scene for CurveScene {
         splines: &mut Vec<Spline>,
         arcs: &mut Vec<Arc>,
         ellipses: &mut Vec<EllipticArc>,
+        planes: &mut Vec<GuidePlane>,
         points: &mut Vec<Vec3>,
     ) {
         // Splines.
@@ -1464,11 +1495,25 @@ impl Scene for CurveScene {
                 Err(e) => eprintln!("Elliptic arc creation failed: {e:?}"),
             }
         }
-        // The source arc is drawn too, so the projection can be compared against it.
+        // The plane only depends on its own two widgets. The source arc is drawn too, so
+        // the projection can be compared against it.
+        planes.clear();
+        let (origin, normal) = (inputs[23], (inputs[24] - inputs[23]).normalize_or_zero());
+        if normal != Vec3::ZERO {
+            // One side along world X projected onto the plane (Y if X is the normal), so
+            // the rectangle does not spin while dragging.
+            let u = (Vec3::X - normal * normal.x)
+                .try_normalize()
+                .unwrap_or_else(|| Vec3::Y - normal * normal.y);
+            planes.push(GuidePlane {
+                center: origin,
+                half_u: u * PLANE_HALF_SIZE,
+                half_v: normal.cross(u) * PLANE_HALF_SIZE,
+            });
+        }
         if let Ok(arc) = Arc::from_three_points(inputs[20], inputs[21], inputs[22]) {
-            let normal = inputs[23] - arc.center();
-            if normal.length() > f32::EPSILON {
-                match EllipticArc::from_projected_arc(&arc, arc.center(), normal) {
+            if normal != Vec3::ZERO {
+                match EllipticArc::from_projected_arc(&arc, origin, normal) {
                     Ok(earc) => ellipses.push(earc),
                     Err(e) => eprintln!("Projected elliptic arc failed: {e:?}"),
                 }
