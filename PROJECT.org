@@ -27,11 +27,13 @@
   <2026-06-12 Fri 10:11> Addeed simple functions to create elliptic arcs and
   tests for them. Now starting to expand the API.
 
-* NEXT tn7uye - Implement adaptive and uniform sampling for elliptic arcs
+* DONE tn7uye - Implement adaptive and uniform sampling for elliptic arcs
+  CLOSED: [2026-10-20 Tue 18:09]
   :PROPERTIES:
   :CREATED:  2026-06-12 Fri 10:29
   :END:
   :LOGBOOK:
+  - State "DONE"       from "NEXT"       [2026-10-20 Tue 18:09]
   - State "NEXT"       from "TODO"       [2026-10-20 Tue 13:22]
   :END:
 
@@ -166,33 +168,30 @@
   :CREATED:  2026-06-12 Fri 10:12
   :END:
 
-  Arc length parametrization is not possible for ellipses. It feels a bit bolted
-  on to the arcs and lines too, since the internal representation just
-  interpolates between 0 and 1, and we just pretend from the outside that they
-  are length parametrized. It feels better to just parametrize Arc and
-  LineSegment from 0 to 1, and just let the Spline do its thing.
+  Arc length parametrization is not possible for ellipses. It feels a bit bolted on to the arcs and
+  lines too, since the internal representation just interpolates between 0 and 1, and we just
+  pretend from the outside that they are length parametrized. It feels better to just parametrize
+  Arc and LineSegment from 0 to 1, and just let the Spline do its thing.
 
 * TODO Trimming Curves
   :PROPERTIES:
   :CREATED:  2026-06-06 Sat 18:13
   :END:
 
-  - trim_left should remove the section of the curve from the start up to the
-    provided parameter.
+  - trim_left should remove the section of the curve from the start up to the provided parameter.
   - trim_right remove the section from the parameter to the end of the curve.
-  - extract_interval should trim both the left and right sides of the given pair
-    of parameters.
+  - extract_interval should trim both the left and right sides of the given pair of parameters.
 
-  It is yet unclear whether these functions should modify the curve in place, or
-  return a modified copy. Needs more thought.
+  It is yet unclear whether these functions should modify the curve in place, or return a modified
+  copy. Needs more thought.
 
 ** TODO Knot Insertion
    :PROPERTIES:
    :CREATED:  2026-06-06 Sat 18:43
    :END:
 
-   Inserting knots in a spline is required for splitting splines. The algo is
-   described [[docview:~/zettelkasten/ntop-zettelkasten/data/e9/bbaa4f-ef2e-42ef-99ea-b489c591fbcf/The NURBS Book.pdf::152][here in the NURBS book]].
+   Inserting knots in a spline is required for splitting splines. The algo is described [[docview:~/zettelkasten/ntop-zettelkasten/data/e9/bbaa4f-ef2e-42ef-99ea-b489c591fbcf/The NURBS Book.pdf::152][here in the
+   NURBS book]].
 
 * TODO Projecting curves on to a plane
   :PROPERTIES:
