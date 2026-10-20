@@ -460,20 +460,16 @@ impl<const DIM: usize, A: Adaptor<DIM>> EllipticArc<DIM, A> {
         {
             return Err(Error::DegenerateValue);
         }
-        let mut angle = A::acos(A::clamp(
-            A::dot_product(A::normalize(start_vec), A::normalize(end_vec)),
-            A::scalar(-1.0),
-            A::scalar(1.0),
-        ));
-        if arc.angle > A::scalar(PI) {
-            angle = A::scalar(TAU) - angle;
-        }
+        // Projection is linear, so projecting the circle's slerp combination of
+        // start/mid/end equals the same slerp combination of the projected vectors.
+        // The slerp weights must therefore use the original circle's sweep angle, not
+        // the (distorted) angle between the projected vectors.
         Ok(Self {
             center,
             start_vec,
             mid_vec,
             end_vec,
-            angle,
+            angle: arc.angle,
         })
     }
 
@@ -2891,6 +2887,31 @@ mod test {
         // Vectors from center are projections of direction vectors (Z component removed),
         // so they should be unchanged since the arc is already in the XY plane.
         assert!((earc.start_vec - DVec([1.0, 0.0, 0.0])).length() < 1e-10);
+    }
+
+    #[test]
+    fn t_projected_arc_matches_projected_points() {
+        // Every point on the elliptic arc must be the projection of the corresponding
+        // point on the original circular arc. The plane is tilted about an axis that is
+        // not aligned with the arc, so projected angles differ from the original angles.
+        let arc = Arc3d::from_three_points(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([FRAC_1_SQRT_2, FRAC_1_SQRT_2, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+        )
+        .unwrap();
+        let plane_pt = DVec([0.0, 0.0, 0.0]);
+        let normal = DVec([1.0, 1.0, 1.0]).normalize();
+        let earc = EllipticArc3d::from_projected_arc(&arc, plane_pt, normal).unwrap();
+        let project = |p: DVec3| p - normal * normal.dot(p - plane_pt);
+        let len = arc.length();
+        for i in 0..=16 {
+            let t = i as f64 / 16.0;
+            let expected = project(arc.point(t * len).unwrap());
+            let actual = earc.point(t).unwrap();
+            let err = (expected - actual).length();
+            assert!(err < 1e-10, "t={t}: err={err}");
+        }
     }
 
     // ===================== EllipticArc::point and tangent =====================
