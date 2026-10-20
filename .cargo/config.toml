@@ -1,2 +1,5 @@
 [build]
+# Performance only: lets the compiler use the build machine's instructions (e.g. FMA for
+# `mul_add`, AVX2). Results are unchanged. Applies only to builds inside this repo, not to
+# crates that depend on loke.
 rustflags = ["-C", "target-cpu=native"]
