@@ -40,6 +40,10 @@
    span without the flag, against 6.8 ns with it. Every curve calls =dot=. Options: plain
    multiply-add (=a * b + c=), or =mul_add= only when the =fma= target feature is enabled.
 
+   Questions: How do plain operators compare in performance to the mul_add with cpu=native? How much
+   performance are we leaving on the table by worrying about projects that don't compile to native
+   CPU? Does branching based on fma feature availability get us the best of both worlds?
+
 ** NEXT Older benches grow their output buffer
    :PROPERTIES:
    :CREATED:  2026-10-20 Tue
