@@ -115,8 +115,10 @@
    be common, split the sweep into a few pieces, each with its own equal step sized for the worst
    point inside it; that keeps the cheap recurrence.
 
-** NEXT Uniform sampling
+** DONE Uniform sampling
+   CLOSED: [2026-10-20 Tue 18:05]
    :LOGBOOK:
+   - State "DONE"       from "NEXT"       [2026-10-20 Tue 18:05]
    - State "NEXT"       from              [2026-10-20 Tue 17:21]
    :END:
 
