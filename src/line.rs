@@ -18,9 +18,10 @@ impl<const DIM: usize, A: Adaptor<DIM>> LineSeg<DIM, A> {
         }
     }
 
+    /// Parameter domain: `[0, 1]`, from `start` to `end`.
     #[inline(always)]
     pub fn domain(&self) -> (A::Scalar, A::Scalar) {
-        (A::scalar(0.0), self.length())
+        (A::scalar(0.0), A::scalar(1.0))
     }
 
     #[inline(always)]
@@ -28,56 +29,41 @@ impl<const DIM: usize, A: Adaptor<DIM>> LineSeg<DIM, A> {
         A::vector_length(self.to - self.from)
     }
 
+    #[inline(always)]
+    fn valid_param(u: A::Scalar) -> bool {
+        u >= A::scalar(0.0) && u <= A::scalar(1.0)
+    }
+
+    /// The point at parameter `u` in `[0, 1]`.
     pub fn point(&self, u: A::Scalar) -> Option<A::Vector> {
-        let len = self.length();
-        if len == A::scalar(0.0) {
-            Some(self.from)
-        } else if u >= A::scalar(0.0) && u <= len {
-            let u = u / len;
-            Some(self.from * (A::scalar(1.0) - u) + self.to * u)
-        } else {
-            None
-        }
+        Self::valid_param(u).then(|| self.from * (A::scalar(1.0) - u) + self.to * u)
     }
 
+    /// The derivative `dP/du = end - start` at `u` in `[0, 1]` (not normalized).
     pub fn tangent(&self, u: A::Scalar) -> Option<A::Vector> {
-        let len = self.length();
-        if u >= A::scalar(0.0) && u <= len && len > A::scalar(0.0) {
-            Some((self.to - self.from) / len)
-        } else {
-            None
-        }
+        Self::valid_param(u).then(|| self.to - self.from)
     }
 
+    /// Curvature vector (always zero) at `u` in `[0, 1]`.
     pub fn curvature(&self, u: A::Scalar) -> Option<A::Vector> {
-        let len = self.length();
-        if u >= A::scalar(0.0) && u <= len {
-            Some(A::zero_vector())
-        } else {
-            None
-        }
+        Self::valid_param(u).then(A::zero_vector)
     }
 
+    /// The point and its derivatives with respect to `u` in `[0, 1]`: `results[0]` is the
+    /// point, `results[1]` is `end - start`, and the rest are zero.
     pub fn point_with_derivs(&self, u: A::Scalar, results: &mut [A::Vector]) -> Result<(), Error> {
         if results.is_empty() {
             return Ok(()); // Nothing to evaluate.
         }
-        let len = self.length();
-        if len == A::scalar(0.0) {
-            results[0] = self.from;
-            results[1..].fill(A::zero_vector());
-            Ok(())
-        } else if u >= A::scalar(0.0) && u <= len {
-            let u = u / len;
-            results[0] = self.from * (A::scalar(1.0) - u) + self.to * u;
-            if results.len() > 1 {
-                results[1] = (self.to - self.from) / len;
-                results[2..].fill(A::zero_vector());
-            }
-            Ok(())
-        } else {
-            Err(Error::InvalidParameter)
+        if !Self::valid_param(u) {
+            return Err(Error::InvalidParameter);
         }
+        results[0] = self.from * (A::scalar(1.0) - u) + self.to * u;
+        if results.len() > 1 {
+            results[1] = self.to - self.from;
+            results[2..].fill(A::zero_vector());
+        }
+        Ok(())
     }
 
     pub fn start(&self) -> A::Vector {
@@ -196,9 +182,8 @@ mod test {
     fn t_length_and_domain() {
         let line = LineSeg3d::create(DVec([1.0, 0.0, 0.0]), DVec([4.0, 0.0, 0.0]));
         assert!((line.length() - 3.0).abs() < 1e-12);
-        let (lo, hi) = line.domain();
-        assert!(lo.abs() < 1e-12);
-        assert!((hi - 3.0).abs() < 1e-12);
+        // The domain is [0, 1] regardless of the length.
+        assert_eq!(line.domain(), (0.0, 1.0));
     }
 
     #[test]
@@ -211,10 +196,9 @@ mod test {
     #[test]
     fn t_point_at_endpoints_and_midpoint() {
         let line = LineSeg3d::create(DVec([1.0, 0.0, 0.0]), DVec([4.0, 0.0, 0.0]));
-        let len = line.length();
         let p0 = line.point(0.0).unwrap();
-        let p1 = line.point(len).unwrap();
-        let pm = line.point(len / 2.0).unwrap();
+        let p1 = line.point(1.0).unwrap();
+        let pm = line.point(0.5).unwrap();
         assert!((p0 - line.start()).length() < 1e-12);
         assert!((p1 - line.end()).length() < 1e-12);
         assert!((pm - DVec([2.5, 0.0, 0.0])).length() < 1e-12);
@@ -224,18 +208,19 @@ mod test {
     fn t_point_out_of_range() {
         let line = LineSeg3d::create(DVec([1.0, 0.0, 0.0]), DVec([4.0, 0.0, 0.0]));
         assert!(line.point(-0.001).is_none());
-        assert!(line.point(line.length() + 0.001).is_none());
+        assert!(line.point(1.001).is_none());
+        // Inside [0, 1] but past the old arc-length domain of a short line.
+        let short = LineSeg3d::create(DVec([0.0, 0.0, 0.0]), DVec([0.3, 0.0, 0.0]));
+        assert!((short.point(0.9).unwrap() - DVec([0.27, 0.0, 0.0])).length() < 1e-12);
     }
 
     #[test]
-    fn t_tangent_is_unit_and_constant() {
+    fn t_tangent_is_end_minus_start_and_constant() {
         let line = LineSeg3d::create(DVec([0.0, 0.0, 0.0]), DVec([3.0, 4.0, 0.0]));
-        let len = line.length();
-        assert!((len - 5.0).abs() < 1e-12);
         for i in 0..=10 {
-            let t = len * i as f64 / 10.0;
+            let t = i as f64 / 10.0;
             let tan = line.tangent(t).unwrap();
-            assert!((tan - DVec([0.6, 0.8, 0.0])).length() < 1e-12);
+            assert!((tan - DVec([3.0, 4.0, 0.0])).length() < 1e-12);
         }
     }
 
@@ -243,16 +228,15 @@ mod test {
     fn t_tangent_out_of_range() {
         let line = LineSeg3d::create(DVec([1.0, 0.0, 0.0]), DVec([4.0, 0.0, 0.0]));
         assert!(line.tangent(-0.001).is_none());
-        assert!(line.tangent(line.length() + 0.001).is_none());
+        assert!(line.tangent(1.001).is_none());
     }
 
     #[test]
     fn t_point_with_derivs_matches_point_and_tangent() {
         let line = LineSeg3d::create(DVec([1.0, 2.0, 3.0]), DVec([4.0, 6.0, 3.0]));
-        let len = line.length();
         let mut results = [DVec([0.0; 3]); 4];
         for i in 0..=10 {
-            let t = len * i as f64 / 10.0;
+            let t = i as f64 / 10.0;
             line.point_with_derivs(t, &mut results).unwrap();
             let pt = line.point(t).unwrap();
             let tan = line.tangent(t).unwrap();
@@ -269,10 +253,7 @@ mod test {
         let line = LineSeg3d::create(DVec([1.0, 0.0, 0.0]), DVec([4.0, 0.0, 0.0]));
         let mut results = [DVec([0.0; 3]); 2];
         assert!(line.point_with_derivs(-0.001, &mut results).is_err());
-        assert!(
-            line.point_with_derivs(line.length() + 0.001, &mut results)
-                .is_err()
-        );
+        assert!(line.point_with_derivs(1.001, &mut results).is_err());
     }
 
     #[test]
@@ -281,12 +262,11 @@ mod test {
         let rev = line.reversed();
         assert_eq!(rev.start(), line.end());
         assert_eq!(rev.end(), line.start());
-        let len = line.length();
-        assert!((rev.length() - len).abs() < 1e-12);
+        assert!((rev.length() - line.length()).abs() < 1e-12);
         for i in 0..=10 {
-            let t = len * i as f64 / 10.0;
+            let t = i as f64 / 10.0;
             let fwd = line.point(t).unwrap();
-            let bwd = rev.point(len - t).unwrap();
+            let bwd = rev.point(1.0 - t).unwrap();
             assert!((fwd - bwd).length() < 1e-12);
         }
     }
@@ -369,9 +349,11 @@ mod test {
     fn t_degenerate_zero_length() {
         let line = LineSeg3d::create(DVec([5.0, 5.0, 5.0]), DVec([5.0, 5.0, 5.0]));
         assert!(line.length() < 1e-12);
-        let p = line.point(0.0).unwrap();
-        assert_eq!(p, DVec([5.0, 5.0, 5.0]));
-        assert!(line.tangent(0.0).is_none());
+        for t in [0.0, 0.37, 1.0] {
+            assert_eq!(line.point(t).unwrap(), DVec([5.0, 5.0, 5.0]));
+            assert_eq!(line.tangent(t).unwrap(), DVec([0.0; 3]));
+        }
+        assert!(line.point(1.2).is_none());
         let mut results = [DVec([0.0; 3]); 3];
         line.point_with_derivs(0.0, &mut results).unwrap();
         assert_eq!(results[0], DVec([5.0, 5.0, 5.0]));
@@ -384,19 +366,18 @@ mod test {
         let line = LineSeg3d::create(DVec([0.0, 0.0, 0.0]), DVec([1.0, 1.0, 1.0]));
         let expected_len = 3.0_f64.sqrt();
         assert!((line.length() - expected_len).abs() < 1e-12);
-        let mid = line.point(expected_len / 2.0).unwrap();
+        let mid = line.point(0.5).unwrap();
         assert!((mid - DVec([0.5, 0.5, 0.5])).length() < 1e-12);
     }
 
     #[test]
     fn t_curvature_zero_everywhere_none_outside() {
         let line = LineSeg3d::create(DVec([1.0, 2.0, 3.0]), DVec([4.0, 6.0, 3.0]));
-        let len = line.length();
         assert_eq!(line.curvature(0.0), Some(DVec([0.0; 3])));
-        assert_eq!(line.curvature(len / 2.0), Some(DVec([0.0; 3])));
-        assert_eq!(line.curvature(len), Some(DVec([0.0; 3])));
+        assert_eq!(line.curvature(0.5), Some(DVec([0.0; 3])));
+        assert_eq!(line.curvature(1.0), Some(DVec([0.0; 3])));
         assert!(line.curvature(-0.001).is_none());
-        assert!(line.curvature(len + 0.001).is_none());
+        assert!(line.curvature(1.001).is_none());
     }
 
     #[test]

@@ -136,9 +136,9 @@ where
         })
     }
 
-    /// Parameter domain: `[0, arc_length]`.
+    /// Parameter domain: `[0, 1]`, from the start to the end of the arc.
     pub fn domain(&self) -> (A::Scalar, A::Scalar) {
-        (A::scalar(0.0), self.length())
+        (A::scalar(0.0), A::scalar(1.0))
     }
 
     /// Total arc length.
@@ -167,16 +167,15 @@ where
         self.center + self.end_dir * self.radius
     }
 
-    /// Evaluate a point on the arc at arc-length parameter `t` in `[0, length]`.
+    /// Evaluate a point on the arc at parameter `t` in `[0, 1]`.
     pub fn point(&self, t: A::Scalar) -> Option<A::Vector>
     where
         A: TrigonometryAdaptor,
     {
-        let len = self.length();
-        if t < A::scalar(0.0) || t > len {
+        if t < A::scalar(0.0) || t > A::scalar(1.0) {
             return None;
         }
-        let coeff = slerp::<A>(self.angle, t / len);
+        let coeff = slerp::<A>(self.angle, t);
         Some(
             self.center
                 + self.start_dir * coeff[0] * self.radius
@@ -185,23 +184,24 @@ where
         )
     }
 
-    /// Evaluate the unit tangent at arc-length parameter `t` in `[0, length]`.
+    /// The derivative `dP/dt` at parameter `t` in `[0, 1]`. It is tangent to the arc, and its
+    /// length is the arc length (not normalized).
     pub fn tangent(&self, t: A::Scalar) -> Option<A::Vector>
     where
         A: TrigonometryAdaptor,
     {
-        let len = self.length();
-        if t < A::scalar(0.0) || t > len || self.radius < A::epsilon() {
+        if t < A::scalar(0.0) || t > A::scalar(1.0) {
             return None;
         }
-        let coeff = slerp_deriv::<A>(self.angle, t / len);
-        // Arc-length parameterization: scale by ds/dt = 1/length to get unit tangent.
+        let coeff = slerp_deriv::<A>(self.angle, t);
         Some(
             (self.start_dir * coeff[0] + self.mid_dir * coeff[1] + self.end_dir * coeff[2])
-                / self.angle,
+                * self.radius,
         )
     }
 
+    /// Curvature vector `d²P/ds²` (for arc length `s`) at `t` in `[0, 1]`: it points to the
+    /// center, and its length is `1 / radius`.
     pub fn curvature(&self, t: A::Scalar) -> Option<A::Vector>
     where
         A: TrigonometryAdaptor,
@@ -214,6 +214,11 @@ where
         }
     }
 
+    /// Evaluate the point and its derivatives with respect to the parameter `t` in `[0, 1]`.
+    ///
+    /// `results[0]` is the point, `results[1]` is the first derivative (the same as
+    /// [`Self::tangent`]), `results[2]` the second derivative, and so on for as many entries as
+    /// the slice has. Use [`Self::curvature`] for the curvature vector.
     pub fn point_with_derivs(&self, t: A::Scalar, results: &mut [A::Vector]) -> Result<(), Error>
     where
         A: TrigonometryAdaptor,
@@ -221,35 +226,25 @@ where
         if results.is_empty() {
             return Ok(());
         }
-        let len = self.length();
-        if t < A::scalar(0.0) || t > len {
+        if t < A::scalar(0.0) || t > A::scalar(1.0) {
             return Err(Error::InvalidParameter);
         }
-        let frac = t / len;
+        let blend = |w: [A::Scalar; 3]| {
+            (self.start_dir * w[0] + self.mid_dir * w[1] + self.end_dir * w[2]) * self.radius
+        };
         if results.len() == 1 {
-            let coeff = slerp::<A>(self.angle, frac);
-            results[0] = self.center
-                + self.start_dir * coeff[0] * self.radius
-                + self.mid_dir * coeff[1] * self.radius
-                + self.end_dir * coeff[2] * self.radius;
-            Ok(())
-        } else {
-            let [pos_coeff, deriv_coeff] = slerp_with_deriv::<A>(self.angle, frac);
-            let pos = self.center
-                + self.start_dir * pos_coeff[0] * self.radius
-                + self.mid_dir * pos_coeff[1] * self.radius
-                + self.end_dir * pos_coeff[2] * self.radius;
-            results[0] = pos;
-            results[1] = (self.start_dir * deriv_coeff[0]
-                + self.mid_dir * deriv_coeff[1]
-                + self.end_dir * deriv_coeff[2])
-                / self.angle;
-            if results.len() > 2 {
-                results[2] = (self.center - pos) / (self.radius * self.radius);
-                results[3..].fill(A::vector([A::scalar(0.0); DIM]));
-            }
-            Ok(())
+            results[0] = self.center + blend(slerp::<A>(self.angle, t));
+            return Ok(());
         }
+        // As for an elliptic arc (ELLIPSE ARC MATH §7.5): d_k = -θ² d_{k-2}, with d_0 = P - c.
+        let [pos, deriv] = slerp_with_deriv::<A>(self.angle, t);
+        results[0] = blend(pos);
+        results[1] = blend(deriv);
+        for k in 2..results.len() {
+            results[k] = results[k - 2] * -(self.angle * self.angle);
+        }
+        results[0] += self.center;
+        Ok(())
     }
 
     /// Uniformly sample the arc with the given tolerance (max chord deviation).
@@ -1800,7 +1795,7 @@ mod test {
         assert!((arc.length() - expected_len).abs() < 1e-10);
         assert!((arc.radius() - 1.0).abs() < 1e-10);
         // Midpoint should be at (0, 1, 0).
-        let mid = arc.point(expected_len / 2.0).unwrap();
+        let mid = arc.point(0.5).unwrap();
         assert!((mid[0]).abs() < 1e-6);
         assert!((mid[1] - 1.0).abs() < 1e-6);
         // Endpoints exact.
@@ -1852,7 +1847,7 @@ mod test {
             expected_len
         );
         // Midpoint should be at (0, -1, 0).
-        let mid = arc.point(expected_len / 2.0).unwrap();
+        let mid = arc.point(0.5).unwrap();
         assert!((mid[0]).abs() < 1e-6);
         assert!((mid[1] + 1.0).abs() < 1e-6, "mid.y = {}", mid[1]);
         // CW in XY plane → normal = -Z.
@@ -1886,7 +1881,7 @@ mod test {
             arc.radius()
         );
         // True midpoint of a 300° arc starting at 0° going CW is at 0° − 150° = 210°.
-        let arc_mid = arc.point(arc.length() / 2.0).unwrap();
+        let arc_mid = arc.point(0.5).unwrap();
         let expected_mid = DVec([-(3f64.sqrt() / 2.0), -0.5, 0.0]); // cos210°, sin210°
         assert!(
             (arc_mid[0] - expected_mid[0]).abs() < 1e-6,
@@ -1919,9 +1914,9 @@ mod test {
         // when sampled at mirrored parameters.
         let n = 20;
         for i in 0..=n {
-            let t = len * i as f64 / n as f64;
+            let t = i as f64 / n as f64;
             let fwd = arc.point(t).unwrap();
-            let bwd = rev.point(len - t).unwrap();
+            let bwd = rev.point(1.0 - t).unwrap();
             let err = (fwd - bwd).length();
             assert!(err < 1e-10, "mismatch at t={t}: err={err}");
         }
@@ -1935,26 +1930,25 @@ mod test {
             DVec([-1.0, 0.0, 0.0]),
         )
         .unwrap();
-        let len = arc.length();
         for i in 0..=10 {
-            let t = len * i as f64 / 10.0;
+            let t = i as f64 / 10.0;
             let p = arc.point(t).unwrap();
             let tan = arc.tangent(t).unwrap();
             let radial = (p - arc.center()).normalize();
             let dot = radial.dot(tan).abs();
             assert!(dot < 1e-6, "tangent not perpendicular at t={t}: dot={dot}");
-            // Arc3d-length parameterization ⇒ unit tangent.
+            // Constant speed over [0, 1] ⇒ |tangent| = length.
             let mag = tan.length();
             assert!(
-                (mag - 1.0).abs() < 1e-6,
-                "tangent not unit length at t={t}: |tan|={mag}"
+                (mag - arc.length()).abs() < 1e-6,
+                "|tangent| != length at t={t}: |tan|={mag}"
             );
         }
     }
 
     #[test]
-    fn t_unit_speed_parameterization() {
-        // Arc3d-length parameterization means |dp/dt| = 1 everywhere.
+    fn t_constant_speed_parameterization() {
+        // The parameter runs over [0, 1] at constant speed, so |dp/dt| = length everywhere.
         let arc = Arc3d::from_three_points(
             DVec([2.0, 0.0, 0.0]),
             DVec([0.0, 2.0, 0.0]),
@@ -1964,21 +1958,21 @@ mod test {
         let len = arc.length();
         let dt = 1e-7;
         for i in 0..10 {
-            let t = len * i as f64 / 10.0;
-            // Numerical: finite difference speed should be 1.
+            let t = i as f64 / 10.0;
+            // Numerical: finite difference speed should be the length.
             let p0 = arc.point(t).unwrap();
             let p1 = arc.point(t + dt).unwrap();
             let speed = (p1 - p0).length() / dt;
             assert!(
-                (speed - 1.0).abs() < 1e-4,
-                "numerical speed at t={t}: {speed} != 1.0"
+                (speed - len).abs() < 1e-4 * len,
+                "numerical speed at t={t}: {speed} != {len}"
             );
-            // Analytical: tangent magnitude should be 1.
+            // Analytical: tangent magnitude should be the length.
             let tan = arc.tangent(t).unwrap();
             let mag = tan.length();
             assert!(
-                (mag - 1.0).abs() < 1e-6,
-                "tangent magnitude at t={t}: {mag} != 1.0"
+                (mag - len).abs() < 1e-10 * len,
+                "tangent magnitude at t={t}: {mag} != {len}"
             );
         }
     }
@@ -2005,10 +1999,9 @@ mod test {
         )
         .unwrap();
         // All points should be equidistant from center.
-        let len = arc.length();
         let r = arc.radius();
         for i in 0..=20 {
-            let t = len * i as f64 / 20.0;
+            let t = i as f64 / 20.0;
             let p = arc.point(t).unwrap();
             let dist = (p - arc.center()).length();
             assert!(
@@ -2027,7 +2020,7 @@ mod test {
         )
         .unwrap();
         assert!(arc.point(-1.0).is_none());
-        assert!(arc.point(arc.length() + 1.0).is_none());
+        assert!(arc.point(1.001).is_none());
     }
 
     #[test]
@@ -2124,10 +2117,9 @@ mod test {
             DVec([-1.0, 0.0, 0.0]),
         )
         .unwrap();
-        let len = arc.length();
         let mut results = [DVec([0.0, 0.0, 0.0]); 3];
         for i in 0..=10 {
-            let t = len * i as f64 / 10.0;
+            let t = i as f64 / 10.0;
             arc.point_with_derivs(t, &mut results).unwrap();
             let p = arc.point(t).unwrap();
             let tan = arc.tangent(t).unwrap();
@@ -2139,8 +2131,8 @@ mod test {
     }
 
     #[test]
-    fn t_point_with_derivs_curvature() {
-        // d²p/ds² = (1/r) · inward_normal. Magnitude = 1/r, points toward center.
+    fn t_point_with_derivs_second_derivative() {
+        // d²p/dt² = θ² (c - p): magnitude θ² r, pointing toward the center.
         let arc = Arc3d::from_three_points(
             DVec([3.0, 0.0, 0.0]),
             DVec([0.0, 3.0, 0.0]),
@@ -2148,24 +2140,23 @@ mod test {
         )
         .unwrap();
         let r = arc.radius();
-        let len = arc.length();
         let mut results = [DVec([0.0, 0.0, 0.0]); 3];
         for i in 0..=10 {
-            let t = len * i as f64 / 10.0;
+            let t = i as f64 / 10.0;
             arc.point_with_derivs(t, &mut results).unwrap();
             let pos = results[0];
-            let curv = results[2];
-            let mag = curv.length();
+            let d2 = results[2];
+            let mag = d2.length();
+            let expected = arc.angle() * arc.angle() * r;
             assert!(
-                (mag - 1.0 / r).abs() < 1e-6,
-                "curvature magnitude at t={t}: {mag} != {}",
-                1.0 / r
+                (mag - expected).abs() < 1e-9 * expected,
+                "second derivative magnitude at t={t}: {mag} != {expected}"
             );
             let inward = (arc.center() - pos).normalize();
-            let dot = inward.dot(curv.normalize());
+            let dot = inward.dot(d2.normalize());
             assert!(
-                (dot - 1.0).abs() < 1e-6,
-                "curvature not pointing inward at t={t}: dot={dot}"
+                (dot - 1.0).abs() < 1e-9,
+                "second derivative not pointing inward at t={t}: dot={dot}"
             );
         }
     }
@@ -2180,10 +2171,7 @@ mod test {
         .unwrap();
         let mut results = [DVec([0.0, 0.0, 0.0]); 2];
         assert!(arc.point_with_derivs(-1.0, &mut results).is_err());
-        assert!(
-            arc.point_with_derivs(arc.length() + 1.0, &mut results)
-                .is_err()
-        );
+        assert!(arc.point_with_derivs(1.001, &mut results).is_err());
         // Empty slice is a no-op, even out of domain.
         assert!(arc.point_with_derivs(-1.0, &mut []).is_ok());
     }
@@ -2203,18 +2191,25 @@ mod test {
     }
 
     #[test]
-    fn t_point_with_derivs_higher_derivs_zero() {
+    fn t_point_with_derivs_higher_derivs() {
+        // Each derivative is the central difference of the one below it.
         let arc = Arc3d::from_three_points(
-            DVec([1.0, 0.0, 0.0]),
-            DVec([0.0, 1.0, 0.0]),
-            DVec([-1.0, 0.0, 0.0]),
+            DVec([1.3, 0.2, -0.4]),
+            DVec([0.1, 1.7, 0.9]),
+            DVec([-1.1, -0.3, 0.6]),
         )
         .unwrap();
-        let mut results = [DVec([1.0, 1.0, 1.0]); 5]; // pre-fill with non-zero
-        arc.point_with_derivs(arc.length() / 2.0, &mut results)
-            .unwrap();
-        for (i, r) in results[3..].iter().enumerate() {
-            assert_eq!(*r, DVec([0.0, 0.0, 0.0]), "results[{}] not zero", i + 3);
+        let (t, h) = (0.37, 1e-5);
+        let eval = |t: f64| {
+            let mut results = [DVec([0.0, 0.0, 0.0]); 6];
+            arc.point_with_derivs(t, &mut results).unwrap();
+            results
+        };
+        let (at, lo, hi) = (eval(t), eval(t - h), eval(t + h));
+        for k in 0..5 {
+            let fd = (hi[k] - lo[k]) / (2.0 * h);
+            let err = (fd - at[k + 1]).length();
+            assert!(err < 1e-6 * at[k + 1].length(), "d{}: err {err}", k + 1);
         }
     }
 
@@ -2227,16 +2222,15 @@ mod test {
         )
         .unwrap();
         let r = arc.radius();
-        let len = arc.length();
         let mut results = [DVec([0.0, 0.0, 0.0]); 3];
         for i in 0..=10 {
-            let t = len * i as f64 / 10.0;
+            let t = i as f64 / 10.0;
             arc.point_with_derivs(t, &mut results).unwrap();
             let mag = results[2].length();
+            let expected = arc.angle() * arc.angle() * r;
             assert!(
-                (mag - 1.0 / r).abs() < 1e-6,
-                "3D curvature magnitude at t={t}: {mag} != {}",
-                1.0 / r
+                (mag - expected).abs() < 1e-9 * expected,
+                "3D second derivative magnitude at t={t}: {mag} != {expected}"
             );
         }
     }
@@ -2260,7 +2254,7 @@ mod test {
         );
         // All sampled points equidistant from center.
         for i in 0..=20 {
-            let t = len * i as f64 / 20.0;
+            let t = i as f64 / 20.0;
             let p = arc.point(t).unwrap();
             let dist = (p - arc.center()).length();
             assert!(
@@ -2268,14 +2262,17 @@ mod test {
                 "point at t={t} dist={dist} != radius={r}"
             );
         }
-        // Unit speed.
+        // Constant speed over [0, 1]: |dp/dt| = length.
         let dt = 1e-7;
         for i in 0..10 {
-            let t = len * i as f64 / 10.0;
+            let t = i as f64 / 10.0;
             let p0 = arc.point(t).unwrap();
             let p1 = arc.point(t + dt).unwrap();
             let speed = (p1 - p0).length() / dt;
-            assert!((speed - 1.0).abs() < 1e-4, "speed at t={t}: {speed} != 1.0");
+            assert!(
+                (speed - len).abs() < 1e-4 * len,
+                "speed at t={t}: {speed} != {len}"
+            );
         }
     }
 
@@ -2384,7 +2381,7 @@ mod test {
             arc.angle()
         );
         assert_arc_valid(&arc, DVec([1.0, 0.0, 0.0]), DVec([0.0, 1.0, 0.0]), 1e-6);
-        let mid = arc.point(arc.length() / 2.0).unwrap();
+        let mid = arc.point(0.5).unwrap();
         assert!((mid[0] + FRAC_1_SQRT_2).abs() < 1e-6, "mid.x = {}", mid[0]);
         assert!((mid[1] + FRAC_1_SQRT_2).abs() < 1e-6, "mid.y = {}", mid[1]);
     }
@@ -2413,7 +2410,7 @@ mod test {
         assert!((c[1] - 4.0).abs() < 1e-10, "center.y = {}", c[1]);
         assert_arc_valid(&arc, DVec([5.0, 4.0, 0.0]), DVec([3.0, 6.0, 0.0]), 1e-6);
         // Midpoint of quarter arc is at 45° from center: (3+√2, 4+√2, 0).
-        let mid = arc.point(arc.length() / 2.0).unwrap();
+        let mid = arc.point(0.5).unwrap();
         assert!(
             (mid[0] - (3.0 + 2f64.sqrt())).abs() < 1e-6,
             "mid.x = {}",
@@ -2449,7 +2446,7 @@ mod test {
                 .unwrap();
         assert!((arc.radius() - 1.0).abs() < 1e-10);
         assert!((arc.angle() - PI / 2.0).abs() < 1e-10);
-        let mid = arc.point(arc.length() / 2.0).unwrap();
+        let mid = arc.point(0.5).unwrap();
         assert!((mid[0] - FRAC_1_SQRT_2).abs() < 1e-6, "mid.x = {}", mid[0]);
         assert!((mid[1] - FRAC_1_SQRT_2).abs() < 1e-6, "mid.y = {}", mid[1]);
     }
@@ -2475,7 +2472,7 @@ mod test {
             "sweep = {}",
             arc.angle()
         );
-        let mid = arc.point(arc.length() / 2.0).unwrap();
+        let mid = arc.point(0.5).unwrap();
         assert!((mid[0] + FRAC_1_SQRT_2).abs() < 1e-6, "mid.x = {}", mid[0]);
         assert!((mid[1] + FRAC_1_SQRT_2).abs() < 1e-6, "mid.y = {}", mid[1]);
     }
@@ -2637,9 +2634,8 @@ mod test {
         )
         .unwrap();
         let n = arc.intrinsic_normal();
-        let len = arc.length();
         for i in 0..=20 {
-            let t = len * i as f64 / 20.0;
+            let t = i as f64 / 20.0;
             let p = arc.point(t).unwrap();
             let radial = (p - arc.center()).normalize();
             assert!(
@@ -2723,11 +2719,10 @@ mod test {
         let (lo, hi) = arc.bounds();
         let lo = [lo[0], lo[1], lo[2]];
         let hi = [hi[0], hi[1], hi[2]];
-        let len = arc.length();
         let mut observed_min = [f64::INFINITY; 3];
         let mut observed_max = [f64::NEG_INFINITY; 3];
         for i in 0..=n_samples {
-            let t = len * i as f64 / n_samples as f64;
+            let t = i as f64 / n_samples as f64;
             let p = arc.point(t).unwrap();
             let coords = [p[0], p[1], p[2]];
             for j in 0..3 {
@@ -2868,11 +2863,10 @@ mod test {
         .unwrap();
         let (lo, hi) = arc.bounds();
         // Sample densely and check all points are within bounds.
-        let len = arc.length();
         let n = 10000;
         let mut min_x = f64::INFINITY;
         for i in 0..=n {
-            let t = len * (i as f64) / (n as f64);
+            let t = (i as f64) / (n as f64);
             let pt = arc.point(t).unwrap();
             min_x = min_x.min(pt[0]);
             assert!(
@@ -2925,7 +2919,7 @@ mod test {
             .unwrap();
         assert!((arc.radius() - 1.0).abs() < 1e-10);
         assert!((arc.angle() - PI).abs() < 1e-10);
-        let mid = arc.point(arc.length() / 2.0).unwrap();
+        let mid = arc.point(0.5).unwrap();
         assert!(mid[0].abs() < 1e-10);
         assert!((mid[1] - 1.0).abs() < 1e-10);
     }
@@ -2944,7 +2938,7 @@ mod test {
         );
         assert!((arc.angle() - 3.0 * PI / 2.0).abs() < 1e-10);
         // True midpoint at 0° − 135° = 225°.
-        let mid = arc.point(arc.length() / 2.0).unwrap();
+        let mid = arc.point(0.5).unwrap();
         assert!((mid[0] + FRAC_1_SQRT_2).abs() < 1e-6, "mid.x = {}", mid[0]);
         assert!((mid[1] + FRAC_1_SQRT_2).abs() < 1e-6, "mid.y = {}", mid[1]);
     }
@@ -2970,7 +2964,7 @@ mod test {
             arc.angle()
         );
         // True midpoint at 0° − 150° = 210°.
-        let arc_mid = arc.point(arc.length() / 2.0).unwrap();
+        let arc_mid = arc.point(0.5).unwrap();
         assert!(
             (arc_mid[0] - (-(3f64.sqrt() / 2.0))).abs() < 1e-6,
             "mid.x = {}",
@@ -3030,9 +3024,9 @@ mod test {
         assert!((arc.end()[0] - rev.start()[0]).abs() < 1e-10);
         let n = 20;
         for i in 0..=n {
-            let t = len * i as f64 / n as f64;
+            let t = i as f64 / n as f64;
             let fwd = arc.point(t).unwrap();
-            let bwd = rev.point(len - t).unwrap();
+            let bwd = rev.point(1.0 - t).unwrap();
             let err = (fwd - bwd).length();
             assert!(err < 1e-10, "mismatch at t={t}: err={err}");
         }
@@ -3044,7 +3038,7 @@ mod test {
             .unwrap();
         let len = arc.length();
         for i in 0..=10 {
-            let t = len * i as f64 / 10.0;
+            let t = i as f64 / 10.0;
             let p = arc.point(t).unwrap();
             let tan = arc.tangent(t).unwrap();
             let radial = (p - arc.center()).normalize();
@@ -3052,31 +3046,31 @@ mod test {
             assert!(dot < 1e-6, "tangent not perpendicular at t={t}: dot={dot}");
             let mag = tan.length();
             assert!(
-                (mag - 1.0).abs() < 1e-6,
-                "tangent not unit length at t={t}: |tan|={mag}"
+                (mag - len).abs() < 1e-6,
+                "|tangent| != length at t={t}: |tan|={mag}"
             );
         }
     }
 
     #[test]
-    fn t_2d_unit_speed_parameterization() {
+    fn t_2d_constant_speed_parameterization() {
         let arc = Arc2d::from_three_points(DVec([2.0, 0.0]), DVec([0.0, 2.0]), DVec([-2.0, 0.0]))
             .unwrap();
         let len = arc.length();
         let dt = 1e-7;
         for i in 0..10 {
-            let t = len * i as f64 / 10.0;
+            let t = i as f64 / 10.0;
             let p0 = arc.point(t).unwrap();
             let p1 = arc.point(t + dt).unwrap();
             let speed = (p1 - p0).length() / dt;
             assert!(
-                (speed - 1.0).abs() < 1e-4,
-                "numerical speed at t={t}: {speed} != 1.0"
+                (speed - len).abs() < 1e-4 * len,
+                "numerical speed at t={t}: {speed} != {len}"
             );
             let mag = arc.tangent(t).unwrap().length();
             assert!(
-                (mag - 1.0).abs() < 1e-6,
-                "tangent magnitude at t={t}: {mag} != 1.0"
+                (mag - len).abs() < 1e-10 * len,
+                "tangent magnitude at t={t}: {mag} != {len}"
             );
         }
     }
@@ -3086,7 +3080,7 @@ mod test {
         let arc = Arc2d::from_three_points(DVec([1.0, 0.0]), DVec([0.0, 1.0]), DVec([-1.0, 0.0]))
             .unwrap();
         assert!(arc.point(-1.0).is_none());
-        assert!(arc.point(arc.length() + 1.0).is_none());
+        assert!(arc.point(1.001).is_none());
     }
 
     #[test]
@@ -3128,10 +3122,9 @@ mod test {
     fn t_2d_point_with_derivs_matches_point_and_tangent() {
         let arc = Arc2d::from_three_points(DVec([1.0, 0.0]), DVec([0.0, 1.0]), DVec([-1.0, 0.0]))
             .unwrap();
-        let len = arc.length();
         let mut results = [DVec([0.0, 0.0]); 3];
         for i in 0..=10 {
-            let t = len * i as f64 / 10.0;
+            let t = i as f64 / 10.0;
             arc.point_with_derivs(t, &mut results).unwrap();
             let err_p = (results[0] - arc.point(t).unwrap()).length();
             let err_t = (results[1] - arc.tangent(t).unwrap()).length();
@@ -3141,27 +3134,26 @@ mod test {
     }
 
     #[test]
-    fn t_2d_point_with_derivs_curvature() {
-        // d²p/ds² has magnitude 1/r and points toward center.
+    fn t_2d_point_with_derivs_second_derivative() {
+        // d²p/dt² has magnitude θ² r and points toward the center.
         let arc = Arc2d::from_three_points(DVec([3.0, 0.0]), DVec([0.0, 3.0]), DVec([-3.0, 0.0]))
             .unwrap();
         let r = arc.radius();
-        let len = arc.length();
         let mut results = [DVec([0.0, 0.0]); 3];
         for i in 0..=10 {
-            let t = len * i as f64 / 10.0;
+            let t = i as f64 / 10.0;
             arc.point_with_derivs(t, &mut results).unwrap();
             let mag = results[2].length();
+            let expected = arc.angle() * arc.angle() * r;
             assert!(
-                (mag - 1.0 / r).abs() < 1e-6,
-                "curvature magnitude at t={t}: {mag} != {}",
-                1.0 / r
+                (mag - expected).abs() < 1e-9 * expected,
+                "second derivative magnitude at t={t}: {mag} != {expected}"
             );
             let inward = (arc.center() - results[0]).normalize();
             let dot = inward.dot(results[2].normalize());
             assert!(
-                (dot - 1.0).abs() < 1e-6,
-                "curvature not pointing inward at t={t}: dot={dot}"
+                (dot - 1.0).abs() < 1e-9,
+                "second derivative not pointing inward at t={t}: dot={dot}"
             );
         }
     }
@@ -3172,10 +3164,7 @@ mod test {
             .unwrap();
         let mut results = [DVec([0.0, 0.0]); 2];
         assert!(arc.point_with_derivs(-1.0, &mut results).is_err());
-        assert!(
-            arc.point_with_derivs(arc.length() + 1.0, &mut results)
-                .is_err()
-        );
+        assert!(arc.point_with_derivs(1.001, &mut results).is_err());
         assert!(arc.point_with_derivs(-1.0, &mut []).is_ok());
     }
 
@@ -3189,14 +3178,21 @@ mod test {
     }
 
     #[test]
-    fn t_2d_point_with_derivs_higher_derivs_zero() {
-        let arc = Arc2d::from_three_points(DVec([1.0, 0.0]), DVec([0.0, 1.0]), DVec([-1.0, 0.0]))
+    fn t_2d_point_with_derivs_higher_derivs() {
+        // Each derivative is the central difference of the one below it.
+        let arc = Arc2d::from_three_points(DVec([1.7, 0.3]), DVec([-0.2, 1.4]), DVec([-1.1, -0.9]))
             .unwrap();
-        let mut results = [DVec([1.0, 1.0]); 5];
-        arc.point_with_derivs(arc.length() / 2.0, &mut results)
-            .unwrap();
-        for (i, r) in results[3..].iter().enumerate() {
-            assert_eq!(*r, DVec([0.0, 0.0]), "results[{}] not zero", i + 3);
+        let (t, h) = (0.61, 1e-5);
+        let eval = |t: f64| {
+            let mut results = [DVec([0.0, 0.0]); 6];
+            arc.point_with_derivs(t, &mut results).unwrap();
+            results
+        };
+        let (at, lo, hi) = (eval(t), eval(t - h), eval(t + h));
+        for k in 0..5 {
+            let fd = (hi[k] - lo[k]) / (2.0 * h);
+            let err = (fd - at[k + 1]).length();
+            assert!(err < 1e-6 * at[k + 1].length(), "d{}: err {err}", k + 1);
         }
     }
 
@@ -3207,7 +3203,7 @@ mod test {
                 .unwrap();
         assert!((arc.radius() - 1.0).abs() < 1e-6);
         assert!((arc.length() - PI).abs() < 1e-6);
-        let mid = arc.point(arc.length() / 2.0).unwrap();
+        let mid = arc.point(0.5).unwrap();
         assert!(mid[0].abs() < 1e-6);
         assert!((mid[1] - 1.0).abs() < 1e-6);
     }
@@ -3216,7 +3212,8 @@ mod test {
     // uniform_samples tests
     // ======================================================================
 
-    // Helper: collect uniform_samples and assert each point matches arc.point(start + i*step).
+    // Helper: collect uniform_samples and assert each point is at arc length start + i*step,
+    // i.e. at parameter (start + i*step) / length.
     fn check_uniform_samples(arc: &Arc3d, start: f64, step: f64, expected_count: usize) {
         let pts: Vec<_> = arc.uniform_samples(start, step, 1e-6).collect();
         assert_eq!(
@@ -3227,7 +3224,7 @@ mod test {
         );
         for (i, &pt) in pts.iter().enumerate() {
             let u = start + i as f64 * step;
-            let expected = arc.point(u).unwrap();
+            let expected = arc.point((u / arc.length()).min(1.0)).unwrap();
             assert!(
                 (pt - expected).length() < 1e-9,
                 "pt[{i}] at u={u:.6}: got {pt:?}, expected {expected:?}"
@@ -3384,9 +3381,8 @@ mod test {
         )
         .unwrap();
         let r = arc.radius();
-        let len = arc.length();
         for i in 0..=6 {
-            let t = len * i as f64 / 6.0;
+            let t = i as f64 / 6.0;
             let curv = arc.curvature(t).unwrap();
             let p = arc.point(t).unwrap();
             // Magnitude must be 1/r.
@@ -3410,7 +3406,7 @@ mod test {
         let arc = Arc2d::from_three_points(DVec([1.0, 0.0]), DVec([0.0, 1.0]), DVec([-1.0, 0.0]))
             .unwrap();
         assert!(arc.curvature(-0.001).is_none());
-        assert!(arc.curvature(arc.length() + 0.001).is_none());
+        assert!(arc.curvature(1.001).is_none());
     }
 
     // ── is_closed tests ───────────────────────────────────────────────────
@@ -3702,10 +3698,9 @@ mod test {
         let normal = DVec([1.0, 1.0, 1.0]).normalize();
         let earc = EllipticArc3d::from_projected_arc(&arc, plane_pt, normal).unwrap();
         let project = |p: DVec3| p - normal * normal.dot(p - plane_pt);
-        let len = arc.length();
         for i in 0..=16 {
             let t = i as f64 / 16.0;
-            let expected = project(arc.point(t * len).unwrap());
+            let expected = project(arc.point(t).unwrap());
             let actual = earc.point(t).unwrap();
             let err = (expected - actual).length();
             assert!(err < 1e-10, "t={t}: err={err}");
@@ -4228,13 +4223,38 @@ mod test {
             let earc: EllipticArc3d = (&arc).into();
             for k in 0..=10 {
                 let t = k as f64 / 10.0;
-                let expected = arc.curvature(t * arc.length()).unwrap();
+                let expected = arc.curvature(t).unwrap();
                 let actual = earc.curvature(t).unwrap();
                 assert!(
                     (expected - actual).length() < 1e-10,
                     "case {i}, t={t}: {actual:?} vs {expected:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn t_elliptic_matches_circular_arc_parameter() {
+        // Both are parametrized over [0, 1] by the same sweep, so an elliptic arc made from a
+        // circular arc agrees with it at every parameter, in every derivative.
+        let arc = Arc3d::from_three_points(
+            DVec([3.0, 1.0, 2.0]),
+            DVec([0.0, 2.0, 1.0]),
+            DVec([-2.0, 1.0, 4.0]),
+        )
+        .unwrap();
+        let earc = EllipticArc3d::from(&arc);
+        assert_eq!(arc.domain(), earc.domain());
+        for k in 0..=10 {
+            let t = k as f64 / 10.0;
+            let (mut a, mut e) = ([DVec([0.0; 3]); 5], [DVec([0.0; 3]); 5]);
+            arc.point_with_derivs(t, &mut a).unwrap();
+            earc.point_with_derivs(t, &mut e).unwrap();
+            for d in 0..5 {
+                let err = (a[d] - e[d]).length();
+                assert!(err < 1e-10 * (1.0 + a[d].length()), "t={t}, d{d}: {err}");
+            }
+            assert!((arc.tangent(t).unwrap() - earc.tangent(t).unwrap()).length() < 1e-10);
         }
     }
 
@@ -5073,11 +5093,11 @@ mod test {
         let len = arc.length();
         assert!(len.is_finite() && len > 0.0);
         for i in 0..=4 {
-            let t = len * i as f64 / 4.0;
+            let t = i as f64 / 4.0;
             let p = arc.point(t).unwrap();
             assert!(p[0].is_finite() && p[1].is_finite() && p[2].is_finite());
             let tan = arc.tangent(t).unwrap();
-            assert!((tan.length() - 1.0).abs() < 1e-10);
+            assert!((tan.length() - len).abs() < 1e-10);
         }
         assert_eq!(arc.start(), DVec([1.0, 0.0, 0.0]));
         assert_eq!(arc.end(), DVec([0.0, 1.0, 0.0]));
