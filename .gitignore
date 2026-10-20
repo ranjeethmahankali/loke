@@ -1,4 +1,5 @@
 /target
 /.agent-shell/
 Cargo.lock
-/.DS_Store
+
+.DS_Store
