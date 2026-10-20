@@ -24,6 +24,8 @@
   <2026-10-20 Tue 18:24> Changed the parameterization. Realized spline curvature is wrong, it is
   just returning the second derivative w.r.t the parameter. Fixing that now.
 
+  <2026-10-20 Tue 18:26> Spline curvature is now fixed.
+
 * TODO Implement Polycurves
   :PROPERTIES:
   :CREATED:  2026-06-06 Sat 16:36

@@ -191,11 +191,27 @@ where
             .map(|()| results[1])
     }
 
+    /// Curvature vector `d²P/ds²` (for arc length `s`) at `u`. It points toward the center of
+    /// curvature, and its length is the curvature, independent of how the spline is
+    /// parametrized. Returns `None` outside the domain and where the speed is zero, where the
+    /// curvature is undefined.
     pub fn curvature(&self, u: A::Scalar) -> Option<A::Vector> {
+        // ELLIPSE ARC MATH §7.1, which holds for any parametrized curve:
+        // d²P/ds² = (v² P'' - (P'·P'') P') / v⁴ with v = |P'|.
         let mut results = [A::zero_vector(); 3];
-        self.point_with_derivs(u, &mut results)
-            .ok()
-            .map(|()| results[2])
+        self.point_with_derivs(u, &mut results).ok()?;
+        let (d1, d2) = (results[1], results[2]);
+        let speed_sq = A::dot_product(d1, d1);
+        // Zero speed, relative to the speed |P''| Δu that the second derivative gives over the
+        // whole domain (as in §7.4).
+        let (lo, hi) = self.domain();
+        let span = hi - lo;
+        if speed_sq <= A::epsilon() * A::epsilon() * A::dot_product(d2, d2) * span * span
+            || speed_sq == A::scalar(0.0)
+        {
+            return None;
+        }
+        Some((d2 * speed_sq - d1 * A::dot_product(d1, d2)) / (speed_sq * speed_sq))
     }
 
     pub fn start(&self) -> A::Vector {
@@ -2796,20 +2812,99 @@ mod test {
     }
 
     #[test]
-    fn t_curvature_quadratic_constant_second_derivative() {
-        // Quadratic Bezier with p0=(0,0,0), p1=(0.5,1,0), p2=(1,0,0).
-        // P(t) = (t, 2t-2t², 0), so P''(t) = (0,-4,0) everywhere.
+    fn t_curvature_quadratic_parabola() {
+        // Quadratic Bezier with p0=(0,0,0), p1=(0.5,1,0), p2=(1,0,0): P(t) = (t, 2t - 2t², 0),
+        // the parabola y = 2x - 2x². Its curvature is |y''| / (1 + y'²)^(3/2) with y' = 2 - 4x,
+        // y'' = -4, along the normal toward the concave (downward) side.
         let spline = make_clamped(&[vec3(0., 0., 0.), vec3(0.5, 1., 0.), vec3(1., 0., 0.)], 2);
-        let expected = vec3(0., -4., 0.);
         let (lo, hi) = spline.domain();
-        for i in 0..=4 {
-            let t = lo + (hi - lo) * i as f64 / 4.0;
+        for i in 0..=8 {
+            let t = lo + (hi - lo) * i as f64 / 8.0;
+            let x = spline.point(t).unwrap()[0];
+            let slope = 2.0 - 4.0 * x;
+            let kappa = 4.0 / (1.0 + slope * slope).powf(1.5);
+            let normal = vec3(slope, -1.0, 0.0).normalize(); // Perpendicular to (1, y'), downward.
             let curv = spline.curvature(t).unwrap();
             assert!(
-                (curv - expected).length() < 1e-10,
-                "curvature at t={t}: got {curv:?}"
+                (curv - normal * kappa).length() < 1e-10,
+                "curvature at t={t}: got {curv:?}, expected {:?}",
+                normal * kappa
             );
         }
+        // At the apex the speed is 1, so the curvature equals P'' = (0, -4, 0).
+        let apex = spline.curvature(lo + 0.5 * (hi - lo)).unwrap();
+        assert!((apex - vec3(0., -4., 0.)).length() < 1e-10);
+    }
+
+    #[test]
+    fn t_curvature_independent_of_parametrization() {
+        // The same cubic over knots [0, 1, 2] and over those knots scaled by 3.7 and shifted:
+        // the parameter changes, the curve and its curvature do not. P'' changes by 1/3.7².
+        let cps = [
+            vec3(0.3, -0.2, 0.1),
+            vec3(1.4, 2.1, -0.5),
+            vec3(2.9, -1.3, 0.8),
+            vec3(4.2, 0.7, 1.9),
+            vec3(5.1, 2.6, -0.4),
+        ];
+        let knots = [0., 0., 0., 0., 1., 2., 2., 2., 2.];
+        let (a, b) = (3.7, -1.9);
+        let scaled: Vec<f64> = knots.iter().map(|k| a * k + b).collect();
+        let s1 = make(&cps, &knots, 3);
+        let s2 = make(&cps, &scaled, 3);
+        for i in 0..=12 {
+            let u = 2.0 * i as f64 / 12.0;
+            let (k1, k2) = (s1.curvature(u).unwrap(), s2.curvature(a * u + b).unwrap());
+            assert!(
+                (k1 - k2).length() < 1e-10 * k1.length(),
+                "u={u}: {k1:?} vs {k2:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn t_curvature_matches_circumcircle() {
+        // The circle through three nearby points has radius 1/κ and its center lies along the
+        // curvature vector.
+        let spline = make_clamped(
+            &[
+                vec3(0.3, -0.2, 0.1),
+                vec3(1.4, 2.1, -0.5),
+                vec3(2.9, -1.3, 0.8),
+                vec3(4.2, 0.7, 1.9),
+            ],
+            3,
+        );
+        let (lo, hi) = spline.domain();
+        let h = 1e-4 * (hi - lo);
+        for i in 1..10 {
+            let u = lo + (hi - lo) * i as f64 / 10.0;
+            let (p0, p1, p2) = (
+                spline.point(u - h).unwrap(),
+                spline.point(u).unwrap(),
+                spline.point(u + h).unwrap(),
+            );
+            // Circumcenter of the triangle p0 p1 p2.
+            let (ab, ac) = (p1 - p0, p2 - p0);
+            let n = ab.cross(ac);
+            let center =
+                p0 + (n.cross(ab) * ac.dot(ac) + ac.cross(n) * ab.dot(ab)) / (2.0 * n.dot(n));
+            let expected = (center - p1) / (center - p1).dot(center - p1);
+            let curv = spline.curvature(u).unwrap();
+            assert!(
+                (curv - expected).length() < 1e-5 * expected.length(),
+                "u={u}: {curv:?} vs {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn t_curvature_zero_speed_is_none() {
+        // Repeating the first control point of a quadratic makes P'(start) = 0.
+        let spline = make_clamped(&[vec3(0., 0., 0.), vec3(0., 0., 0.), vec3(1., 2., 0.)], 2);
+        let (lo, hi) = spline.domain();
+        assert!(spline.curvature(lo).is_none());
+        assert!(spline.curvature(lo + 0.5 * (hi - lo)).is_some());
     }
 
     // ── is_closed tests ───────────────────────────────────────────────────
