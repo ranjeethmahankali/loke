@@ -163,15 +163,24 @@
    Follow-up, separate task: =Arc::adaptive_samples= and =Arc::uniform_samples= call =sin= twice per
    point; the same rotation recurrence would speed them up.
 
-* TODO Change the domains of Arc and LineSegment
+* NEXT tn88ea - Change the domains of Arc and LineSegment
   :PROPERTIES:
   :CREATED:  2026-06-12 Fri 10:12
+  :END:
+  :LOGBOOK:
+  - State "NEXT"       from "TODO"       [2026-10-20 Tue 18:13]
   :END:
 
   Arc length parametrization is not possible for ellipses. It feels a bit bolted on to the arcs and
   lines too, since the internal representation just interpolates between 0 and 1, and we just
   pretend from the outside that they are length parametrized. It feels better to just parametrize
   Arc and LineSegment from 0 to 1, and just let the Spline do its thing.
+
+  After this task, the curves should have the following parameterization:
+  - Arc: 0 to 1.
+  - Line: 0 to 1.
+  - Elliptic arc: 0 to 1.
+  - Spline: unchanged for now.
 
 * TODO Trimming Curves
   :PROPERTIES:
