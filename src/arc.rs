@@ -633,6 +633,40 @@ Notation: c = center, S = start_vec, T = mid_vec, θ = angle, h = θ/2.
        by a factor of 4. Once the spread is below a fixed threshold, a short Taylor series
        finishes the job, and its truncation error is below 1e-16 (see `carlson_rf`). The
        stopping test is the error bound itself.
+
+§7 Curvature
+
+   The curvature vector is d²P/ds² for arc length s. It points toward the center of
+   curvature and its length is the curvature κ = 1/radius of the best-fitting circle.
+   For a circle it is (c - P)/r².
+
+   7.1 Curvature vector for an arbitrary parameter t.
+       Let P' = dP/dt, P'' = d²P/dt², and speed v = |P'|, so ds/dt = v. The unit tangent
+       is T̂ = P'/v. Differentiate it with respect to t, using dv/dt = (P'·P'')/v:
+           dT̂/dt = P''/v - P' (P'·P'')/v³.
+       Convert to arc length with d/ds = (1/v) d/dt:
+           d²P/ds² = dT̂/ds = P''/v² - P' (P'·P'')/v⁴ = (v² P'' - (P'·P'') P') / v⁴.
+       The second term removes the part of P'' along the tangent (speed changing), leaving
+       the part across it (direction changing). No cross product is used, so this holds in
+       any dimension. It is unchanged by rescaling t: P' scales by k and P'' by k², so
+       the numerator and v⁴ both scale by k⁴.
+
+   7.2 P' and P'' for this curve, with the parameter t in [0, 1].
+       The arc is P(t) = c + cos(θt) U + sin(θt) V (§1 with φ = θt). Differentiating twice,
+           P'' = -θ² (cos(θt) U + sin(θt) V) = -θ² (P - c).
+       P' is `tangent(t)`. Both come from the stored vectors; U and V are not needed.
+
+   7.3 Check against the circle.
+       For a circle |P - c| = r, P' ⟂ (P - c), so P'·P'' = 0 and v = θr. Then
+           d²P/ds² = P''/v² = -θ² (P - c) / (θ² r²) = (c - P)/r².
+
+   7.4 When there is no curvature vector.
+       The speed v is zero at a turning point of a degenerate (flat, B = 0) ellipse, where
+       the curvature is infinite. Since |P''| = θ² |P - c|, we compare the speed with
+       |P''|/θ, which is the size of the speed of a circle through the same point:
+           v² θ² <= ε² |P''|²    =>    no result.
+       This also covers θ = 0 (both sides are zero). For a circle v²θ² = |P''|², so it is
+       never triggered; for a genuine ellipse it needs B/A < ε.
 */
 
 impl<const DIM: usize, A: Adaptor<DIM>> EllipticArc<DIM, A> {
@@ -865,11 +899,29 @@ impl<const DIM: usize, A: Adaptor<DIM>> EllipticArc<DIM, A> {
         Some(self.start_vec * coeff[0] + self.mid_vec * coeff[1] + self.end_vec * coeff[2])
     }
 
-    pub fn curvature(&self) -> Option<A::Vector>
+    /// Curvature vector `d²P/ds²` (for arc length `s`) at `t` in `[0, 1]`. It points toward the
+    /// center of curvature, and its length is the curvature. Returns `None` outside the domain
+    /// and at points where the curvature is infinite (a degenerate, flat ellipse).
+    pub fn curvature(&self, t: A::Scalar) -> Option<A::Vector>
     where
         A: TrigonometryAdaptor,
     {
-        todo!()
+        // See ELLIPSE ARC MATH §7.
+        if t < A::scalar(0.0) || t > A::scalar(1.0) {
+            return None;
+        }
+        let [pos, deriv] = slerp_with_deriv::<A>(self.angle, t);
+        let radial = self.start_vec * pos[0] + self.mid_vec * pos[1] + self.end_vec * pos[2];
+        let d1 = self.start_vec * deriv[0] + self.mid_vec * deriv[1] + self.end_vec * deriv[2];
+        let theta_sq = self.angle * self.angle;
+        let d2 = radial * -theta_sq; // §7.2
+        let speed_sq = A::dot_product(d1, d1);
+        // §7.4
+        if speed_sq * theta_sq <= A::epsilon() * A::epsilon() * A::dot_product(d2, d2) {
+            return None;
+        }
+        // §7.1
+        Some((d2 * speed_sq - d1 * A::dot_product(d1, d2)) / (speed_sq * speed_sq))
     }
 
     pub fn point_with_deriv(&self) -> Option<A::Scalar> {
@@ -3836,6 +3888,147 @@ mod test {
             (actual - expected).abs() < 1e-4 * expected,
             "f32 length {actual} vs f64 {expected}"
         );
+    }
+
+    // ===================== EllipticArc::curvature =====================
+
+    #[test]
+    fn t_elliptic_curvature_matches_circular_arc() {
+        let cases = [
+            ([1.0, 0.0, 0.0], [FRAC_1_SQRT_2, FRAC_1_SQRT_2, 0.0], [0.0, 1.0, 0.0]),
+            ([-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]),
+            ([1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 1.0, 0.0]),
+            ([3.0, 1.0, 2.0], [0.0, 2.0, 1.0], [-2.0, 1.0, 4.0]),
+        ];
+        for (i, (a, b, c)) in cases.into_iter().enumerate() {
+            let arc = Arc3d::from_three_points(DVec(a), DVec(b), DVec(c)).unwrap();
+            let earc: EllipticArc3d = (&arc).into();
+            for k in 0..=10 {
+                let t = k as f64 / 10.0;
+                let expected = arc.curvature(t * arc.length()).unwrap();
+                let actual = earc.curvature(t).unwrap();
+                assert!(
+                    (expected - actual).length() < 1e-10,
+                    "case {i}, t={t}: {actual:?} vs {expected:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn t_elliptic_curvature_axis_aligned() {
+        // x = 5 cos φ, y = 3 sin φ. The curvature is 5/9 at (5, 0) and 3/25 at (0, 3),
+        // pointing at the center. Sweep π puts φ = 0 at t = 0 and φ = π/2 at t = 0.5.
+        let earc = swept_arc(
+            DVec([1.0, 2.0, 3.0]),
+            DVec([5.0, 0.0, 0.0]),
+            DVec([0.0, 3.0, 0.0]),
+            PI,
+        );
+        let k0 = earc.curvature(0.0).unwrap();
+        assert!((k0 - DVec([-5.0 / 9.0, 0.0, 0.0])).length() < 1e-12, "{k0:?}");
+        let k1 = earc.curvature(0.5).unwrap();
+        assert!((k1 - DVec([0.0, -3.0 / 25.0, 0.0])).length() < 1e-12, "{k1:?}");
+        // General point: kappa = a b / (a² sin²φ + b² cos²φ)^(3/2).
+        for i in 0..=10 {
+            let t = i as f64 / 10.0;
+            let phi = PI * t;
+            let (a, b) = (5.0f64, 3.0f64);
+            let kappa = a * b / (a * a * phi.sin().powi(2) + b * b * phi.cos().powi(2)).powf(1.5);
+            let k = earc.curvature(t).unwrap();
+            assert!((k.length() - kappa).abs() < 1e-12, "t={t}: {} vs {kappa}", k.length());
+        }
+    }
+
+    #[test]
+    fn t_elliptic_curvature_geometry() {
+        // The curvature vector is perpendicular to the tangent and points toward the
+        // inside of the curve, for arcs that are neither axis-aligned nor in a plane
+        // through the origin.
+        let c = DVec([-3.0, 4.0, 1.0]);
+        let u = DVec([2.0, -1.0, 0.5]);
+        let v = DVec([0.3, 1.7, -2.2]);
+        for theta in [0.6, PI, 4.4, 6.0] {
+            let earc = swept_arc(c, u, v, theta);
+            for i in 0..=20 {
+                let t = i as f64 / 20.0;
+                let k = earc.curvature(t).unwrap();
+                let tan = earc.tangent(t).unwrap();
+                assert!(k.dot(tan).abs() < 1e-9 * k.length() * tan.length());
+                let inward = earc.center() - earc.point(t).unwrap();
+                assert!(k.dot(inward) > 0.0, "theta={theta}, t={t}: points outward");
+            }
+        }
+    }
+
+    #[test]
+    fn t_elliptic_curvature_finite_difference() {
+        // d²P/ds² = d(unit tangent)/ds, estimated with central differences.
+        let c = DVec([0.5, -1.0, 2.0]);
+        let u = DVec([1.0, 0.0, 0.0]);
+        let v = DVec([1.0, 1.0, 0.5]);
+        let h = 1e-5;
+        for theta in [1.0, PI, 5.0] {
+            let earc = swept_arc(c, u, v, theta);
+            for i in 1..10 {
+                let t = i as f64 / 10.0;
+                let unit = |t: f64| earc.tangent(t).unwrap().normalize();
+                let speed = earc.tangent(t).unwrap().length();
+                let numeric = (unit(t + h) - unit(t - h)) / (2.0 * h * speed);
+                let actual = earc.curvature(t).unwrap();
+                assert!(
+                    (numeric - actual).length() < 1e-6 * actual.length(),
+                    "theta={theta}, t={t}: {actual:?} vs {numeric:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn t_elliptic_curvature_domain_and_degenerate() {
+        let earc = swept_arc(
+            DVec([0.0, 0.0, 0.0]),
+            DVec([2.0, 0.0, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+            2.0,
+        );
+        assert!(earc.curvature(-0.001).is_none());
+        assert!(earc.curvature(1.001).is_none());
+        // A flat ellipse (V = 0): the point at t = 0 is a turning point, with infinite curvature.
+        let flat = swept_arc(
+            DVec([0.0, 0.0, 0.0]),
+            DVec([5.0, 0.0, 0.0]),
+            DVec([0.0, 0.0, 0.0]),
+            2.0,
+        );
+        assert!(flat.curvature(0.0).is_none());
+        // A very thin but genuine ellipse still has a finite, large curvature there: a/b².
+        let thin = swept_arc(
+            DVec([0.0, 0.0, 0.0]),
+            DVec([1.0, 0.0, 0.0]),
+            DVec([0.0, 1e-4, 0.0]),
+            2.0,
+        );
+        let k = thin.curvature(0.0).unwrap().length();
+        assert!((k - 1e8).abs() < 1e-4 * 1e8, "{k}");
+    }
+
+    #[test]
+    fn t_elliptic_curvature_reversed() {
+        // Reversing the direction does not change the curvature vector at a given point.
+        let earc = swept_arc(
+            DVec([0.0, 0.0, 0.0]),
+            DVec([1.0, 0.0, 0.0]),
+            DVec([1.0, 1.0, 0.0]),
+            2.5,
+        );
+        let rev = earc.reversed();
+        for i in 0..=10 {
+            let t = i as f64 / 10.0;
+            let a = earc.curvature(t).unwrap();
+            let b = rev.curvature(1.0 - t).unwrap();
+            assert!((a - b).length() < 1e-9, "t={t}: {a:?} vs {b:?}");
+        }
     }
 
     // ===================== EllipticArc::point and tangent =====================
