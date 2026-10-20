@@ -529,8 +529,114 @@ impl<const DIM: usize, A: Adaptor<DIM>> EllipticArc<DIM, A> {
         self.center
     }
 
-    pub fn focii(&self) -> (A::Vector, A::Vector) {
-        todo!();
+    /// The two foci of the ellipse this arc lies on. For a circle both foci are the center.
+    pub fn focii(&self) -> (A::Vector, A::Vector)
+    where
+        A: TrigonometryAdaptor,
+    {
+        /*
+        DERIVATION
+
+        Notation: c = center, S = start_vec, M = mid_vec, θ = angle, h = θ/2.
+        "·" is the dot product, |x|² = x·x.
+
+        1. The ellipse as a swept loop.
+           Every point on the (full) ellipse is
+               P(φ) = c + cos φ · U + sin φ · V,
+           for some pair of vectors U, V and a parameter angle φ. U and V need not be
+           perpendicular, so they are generally NOT the axes of the ellipse.
+           This arc starts at φ = 0, passes M at φ = h, and ends at φ = θ, so
+               U = S,        M = cos h · U + sin h · V.
+
+        2. Recover V from M.
+           Subtract cos h · U from both sides of the second equation and divide by sin h:
+               V = (M - cos h · S) / sin h.
+           (Using M and not the end vector keeps the divisor sin h, which is only zero
+           for an empty arc. The end vector would need sin θ, which is zero at a
+           semicircle.)
+
+        3. Squared distance from the center, as a function of φ.
+           Let a = U·U, b = V·V, d = U·V. Expanding P(φ) - c = cos φ U + sin φ V:
+               |P - c|² = cos²φ · a + 2 sin φ cos φ · d + sin²φ · b.
+           Use the double-angle identities
+               cos²φ = (1 + cos 2φ)/2,   sin²φ = (1 - cos 2φ)/2,   2 sin φ cos φ = sin 2φ:
+               |P - c|² = (a + b)/2 + ((a - b)/2) · cos 2φ + d · sin 2φ.
+
+        4. Collapse the cos/sin pair into one cosine.
+           Let r = sqrt((a - b)² + 4d²). Then ((a-b)/r, 2d/r) is a point on the unit
+           circle, so there is an angle φ0 with
+               cos 2φ0 = (a - b)/r,   sin 2φ0 = 2d/r.
+           Substitute (a - b) = r cos 2φ0 and 2d = r sin 2φ0 into step 3:
+               ((a-b)/2) cos 2φ + d sin 2φ
+                   = (r/2) (cos 2φ0 cos 2φ + sin 2φ0 sin 2φ)
+                   = (r/2) cos(2φ - 2φ0)           [cos(x - y) = cos x cos y + sin x sin y]
+           so
+               |P - c|² = (a + b)/2 + (r/2) · cos(2(φ - φ0)).
+           A cosine ranges over [-1, 1], hence
+               farthest point:  φ = φ0,        |P - c|² = A² = (a + b + r)/2,
+               nearest point:   φ = φ0 + π/2,  |P - c|² = B² = (a + b - r)/2.
+           The farthest point is the end of the semi-major axis (length A), the nearest
+           the end of the semi-minor axis (length B).
+
+        5. The foci.
+           The foci lie on the major axis, on either side of the center, at distance
+               f = sqrt(A² - B²).
+           From step 4, A² - B² = r, so f = sqrt(r).
+           For a circle a = b and d = 0, so r = 0 and both foci are the center.
+
+        6. The major axis direction without any trig.
+           We need the vector W = P(φ0) - c = x·U + y·V, where (x, y) = (cos φ0, sin φ0).
+           Note |x·U + y·V|² = x²a + 2xy·d + y²b, i.e. the quadratic form of the table
+               G = [ a  d ]
+                   [ d  b ]
+           evaluated at (x, y). Step 4 says (x, y) maximizes it among unit (x, y) and
+           that the maximum is A². This is the "largest eigenvalue" problem: (x, y)
+           satisfies G·(x, y) = λ·(x, y) with λ = A². We check this directly:
+             * Eigenvalues solve det(G - λI) = 0, i.e. (a - λ)(b - λ) - d² = 0, i.e.
+                   λ² - (a + b)λ + (ab - d²) = 0
+                   λ = ((a + b) ± sqrt((a + b)² - 4(ab - d²))) / 2
+                     = ((a + b) ± sqrt((a - b)² + 4d²)) / 2 = (a + b ± r)/2,
+               which are exactly A² and B² from step 4.
+             * For λ = A², the two rows of G·(x, y) = λ·(x, y) read
+                   (a - λ)x + d·y = 0   =>   (x, y) ∝ (d, λ - a)
+                   d·x + (b - λ)y = 0   =>   (x, y) ∝ (λ - b, d).
+               Both describe the same direction because det(G - λI) = 0.
+           With λ - b = (a - b + r)/2 and λ - a = (b - a + r)/2, one of the two
+           candidates always has a component of at least r/2 (the first if a >= b, the
+           second otherwise), which avoids subtracting two nearly equal numbers. We
+           pick that one. No normalization of (x, y) is needed, see step 7.
+
+        7. Normalizing W without computing its length separately.
+           Because G·(x, y) = λ·(x, y),
+               |W|² = (x, y)·G·(x, y) = λ·(x² + y²).
+           The unit major direction is W / sqrt(λ(x² + y²)), so the focal offset is
+               f · W / |W| = W · sqrt(r) / sqrt(λ(x² + y²)) = W · sqrt(r / (λ(x² + y²))),
+           and the foci are c + offset and c - offset.
+        */
+        let (sin_h, cos_h) = A::sin_cos(self.angle * A::scalar(0.5));
+        if sin_h < A::epsilon() {
+            return (self.center, self.center);
+        }
+        let u = self.start_vec;
+        let v = (self.mid_vec - u * cos_h) / sin_h;
+        let a = A::dot_product(u, u);
+        let b = A::dot_product(v, v);
+        let d = A::dot_product(u, v);
+        let diff = a - b;
+        let r = A::sqrt(diff * diff + A::scalar(4.0) * d * d);
+        if r <= A::epsilon() * (a + b) {
+            // Circle (to within precision). The direction of the major axis is undefined.
+            return (self.center, self.center);
+        }
+        let half = A::scalar(0.5);
+        let lambda = (a + b + r) * half;
+        let (x, y) = if diff >= A::scalar(0.0) {
+            ((diff + r) * half, d)
+        } else {
+            (d, (r - diff) * half)
+        };
+        let offset = (u * x + v * y) * A::sqrt(r / (lambda * (x * x + y * y)));
+        (self.center + offset, self.center - offset)
     }
 
     pub fn angle(&self) -> A::Scalar {
@@ -2912,6 +3018,119 @@ mod test {
             let err = (expected - actual).length();
             assert!(err < 1e-10, "t={t}: err={err}");
         }
+    }
+
+    // ===================== EllipticArc::focii =====================
+
+    /// Build an elliptic arc from the swept-loop form `c + cos φ · u + sin φ · v`,
+    /// covering `φ` in `[0, theta]`.
+    fn swept_arc(c: DVec3, u: DVec3, v: DVec3, theta: f64) -> EllipticArc3d {
+        let at = |phi: f64| u * phi.cos() + v * phi.sin();
+        EllipticArc3d {
+            center: c,
+            start_vec: at(0.0),
+            mid_vec: at(theta / 2.0),
+            end_vec: at(theta),
+            angle: theta,
+        }
+    }
+
+    /// Foci are defined by: the sum of distances to them is the same for every point on
+    /// the ellipse, and equals twice the semi-major length.
+    fn assert_focal_sum_constant(earc: &EllipticArc3d, semi_major: f64) {
+        let (f1, f2) = earc.focii();
+        for i in 0..=32 {
+            let p = earc.point(i as f64 / 32.0).unwrap();
+            let sum = (p - f1).length() + (p - f2).length();
+            assert!(
+                (sum - 2.0 * semi_major).abs() < 1e-9,
+                "i={i}: focal sum {sum} != {}",
+                2.0 * semi_major
+            );
+        }
+    }
+
+    #[test]
+    fn t_focii_circle() {
+        let arc = Arc3d::from_three_points(
+            DVec([3.0, 1.0, 0.0]),
+            DVec([1.0, 3.0, 0.0]),
+            DVec([-1.0, 1.0, 0.0]),
+        )
+        .unwrap();
+        let earc: EllipticArc3d = (&arc).into();
+        let (f1, f2) = earc.focii();
+        assert!((f1 - arc.center()).length() < 1e-10);
+        assert!((f2 - arc.center()).length() < 1e-10);
+    }
+
+    #[test]
+    fn t_focii_axis_aligned() {
+        // Semi-axes 5 and 3: foci at (+-4, 0, 0) from the center.
+        let c = DVec([1.0, 2.0, 3.0]);
+        let earc = swept_arc(c, DVec([5.0, 0.0, 0.0]), DVec([0.0, 3.0, 0.0]), 1.0);
+        let (f1, f2) = earc.focii();
+        let (lo, hi) = if f1[0] < f2[0] { (f1, f2) } else { (f2, f1) };
+        assert!((lo - DVec([-3.0, 2.0, 3.0])).length() < 1e-10, "{lo:?}");
+        assert!((hi - DVec([5.0, 2.0, 3.0])).length() < 1e-10, "{hi:?}");
+        // Same ellipse, but the stored start lies on the minor axis instead.
+        let earc = swept_arc(c, DVec([0.0, 3.0, 0.0]), DVec([-5.0, 0.0, 0.0]), 1.0);
+        let (f1, f2) = earc.focii();
+        let (lo, hi) = if f1[0] < f2[0] { (f1, f2) } else { (f2, f1) };
+        assert!((lo - DVec([-3.0, 2.0, 3.0])).length() < 1e-10, "{lo:?}");
+        assert!((hi - DVec([5.0, 2.0, 3.0])).length() < 1e-10, "{hi:?}");
+    }
+
+    #[test]
+    fn t_focii_conjugate_pair() {
+        // u = (1, 0), v = (1, 1): semi-axes are sqrt((3 +- sqrt5)/2) ~ 1.618, 0.618.
+        let semi_major = ((3.0 + 5f64.sqrt()) / 2.0).sqrt();
+        for theta in [0.5, 2.0, PI, 4.0, 5.5] {
+            let earc = swept_arc(
+                DVec([0.5, -1.0, 2.0]),
+                DVec([1.0, 0.0, 0.0]),
+                DVec([1.0, 1.0, 0.0]),
+                theta,
+            );
+            assert_focal_sum_constant(&earc, semi_major);
+        }
+    }
+
+    #[test]
+    fn t_focii_projected_arc() {
+        let arc = Arc3d::from_three_points(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([FRAC_1_SQRT_2, FRAC_1_SQRT_2, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+        )
+        .unwrap();
+        // Projecting a unit circle onto a plane at angle t to its own plane gives semi-axes
+        // 1 and |cos t|. The normal (1,1,1)/sqrt3 gives cos t = 1/sqrt3.
+        let normal = DVec([1.0, 1.0, 1.0]).normalize();
+        let earc = EllipticArc3d::from_projected_arc(&arc, DVec([0.0, 0.0, 0.0]), normal).unwrap();
+        assert_focal_sum_constant(&earc, 1.0);
+        let (f1, f2) = earc.focii();
+        let expected_f = (1.0 - 1.0 / 3.0f64).sqrt();
+        assert!(((f1 - earc.center()).length() - expected_f).abs() < 1e-9);
+        assert!(((f2 - earc.center()).length() - expected_f).abs() < 1e-9);
+    }
+
+    #[test]
+    fn t_focii_reversed() {
+        let semi_major = ((3.0 + 5f64.sqrt()) / 2.0).sqrt();
+        let earc = swept_arc(
+            DVec([0.0, 0.0, 0.0]),
+            DVec([1.0, 0.0, 0.0]),
+            DVec([1.0, 1.0, 0.0]),
+            2.5,
+        );
+        let rev = earc.reversed();
+        assert_focal_sum_constant(&rev, semi_major);
+        let (a1, a2) = earc.focii();
+        let (b1, b2) = rev.focii();
+        let same = (a1 - b1).length() + (a2 - b2).length();
+        let swapped = (a1 - b2).length() + (a2 - b1).length();
+        assert!(same.min(swapped) < 1e-9);
     }
 
     // ===================== EllipticArc::point and tangent =====================
