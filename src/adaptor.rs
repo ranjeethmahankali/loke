@@ -54,6 +54,8 @@ pub trait ScalarAdaptor {
 
 pub trait TrigonometryAdaptor: ScalarAdaptor {
     fn acos(x: Self::Float) -> Self::Float;
+    /// Four-quadrant arctangent of `y / x`, in `(-π, π]`.
+    fn atan2(y: Self::Float, x: Self::Float) -> Self::Float;
     fn sin_cos(x: Self::Float) -> (Self::Float, Self::Float);
     fn sin(x: Self::Float) -> Self::Float;
     fn cos(x: Self::Float) -> Self::Float;

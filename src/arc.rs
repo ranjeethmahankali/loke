@@ -38,7 +38,9 @@ where
     start_vec: A::Vector, // Vector from center toward start.
     mid_vec: A::Vector,   // Vector from center toward midpoint (used for antipodal SLERP).
     end_vec: A::Vector,   // Vector from center toward end.
-    angle: A::Scalar,     // Sweep angle from start_vec to end_vec, through mid_vec.
+    /// Sweep of the *parameter* angle, not the visible angle between `start_vec` and `end_vec`
+    /// (the two agree only for circles). See ELLIPSE ARC MATH §1 above the `impl`.
+    angle: A::Scalar,
 }
 
 impl<const DIM: usize, A> Arc<DIM, A>
@@ -436,6 +438,203 @@ where
     }
 }
 
+/*
+ELLIPSE ARC MATH
+
+Derivations for `EllipticArc`. Code comments refer to the sections below as "§N".
+
+Notation: c = center, S = start_vec, T = mid_vec, θ = angle, h = θ/2.
+"·" is the dot product and |x|² = x·x.
+
+§1 The model
+
+   Every point on the (full) ellipse is
+       P(φ) = c + cos φ · U + sin φ · V,
+   for two vectors U, V and a parameter angle φ. U and V need not be perpendicular, so
+   they are generally NOT the axes of the ellipse.
+
+   The arc is the part with φ in [0, θ]. It starts at φ = 0, passes T at φ = h, and ends
+   at φ = θ, so
+       U = S,    T = cos h · U + sin h · V,    end_vec = cos θ · U + sin θ · V.
+
+   `point` evaluates exactly this curve, using slerp weights on each half of the sweep.
+
+   `angle` is this parameter sweep θ. It is generally NOT the visible angle between S and
+   end_vec; the two agree only for circles. For example, squash a unit circle to half its
+   height and take the arc from 0° to 60°: θ is still 60°, but the visible angle between
+   the squashed start and end is about 40.9°. Many different ellipses share the same
+   center, start and end; θ is what picks one of them. Projecting a circular arc onto a
+   plane is linear, so it keeps θ unchanged (see `from_projected_arc`).
+
+§2 Recovering V
+
+   Subtract cos h · U from both sides of the equation for T in §1 and divide by sin h:
+       V = (T - cos h · S) / sin h.
+   (Using T and not end_vec keeps the divisor sin h, which is only zero for an empty arc.
+   end_vec would need sin θ, which is zero at a semicircle.)
+
+§3 Distance from the center, and the axes
+
+   3.1 Squared distance as a function of φ.
+       Let a = U·U, b = V·V, d = U·V. Expanding P - c = cos φ U + sin φ V:
+           |P - c|² = cos²φ · a + 2 sin φ cos φ · d + sin²φ · b.
+       Use the double-angle identities
+           cos²φ = (1 + cos 2φ)/2,   sin²φ = (1 - cos 2φ)/2,   2 sin φ cos φ = sin 2φ:
+           |P - c|² = (a + b)/2 + ((a - b)/2) · cos 2φ + d · sin 2φ.
+
+   3.2 Collapse the cos/sin pair into one cosine.
+       Let r = sqrt((a - b)² + 4d²). Then ((a - b)/r, 2d/r) is a point on the unit circle,
+       so there is an angle φ0 with
+           cos 2φ0 = (a - b)/r,   sin 2φ0 = 2d/r,   i.e.   φ0 = atan2(2d, a - b) / 2.
+       Substitute (a - b) = r cos 2φ0 and 2d = r sin 2φ0 into 3.1:
+           ((a - b)/2) cos 2φ + d sin 2φ
+               = (r/2) (cos 2φ0 cos 2φ + sin 2φ0 sin 2φ)
+               = (r/2) cos(2φ - 2φ0)          [cos(x - y) = cos x cos y + sin x sin y]
+       so
+           |P - c|² = (a + b)/2 + (r/2) · cos(2(φ - φ0)).
+       A cosine ranges over [-1, 1], hence
+           farthest point:  φ = φ0,        |P - c|² = A² = (a + b + r)/2,
+           nearest point:   φ = φ0 + π/2,  |P - c|² = B² = (a + b - r)/2.
+       The farthest point is the end of the semi-major axis (length A), the nearest the
+       end of the semi-minor axis (length B). Note A² - B² = r, and A² B² = ab - d².
+
+   3.3 The axis frame.
+       Let K = P(φ0) - c (semi-major vector, |K| = A) and L = P(φ0 + π/2) - c (semi-minor
+       vector, |L| = B). With ψ = φ - φ0 and the angle-addition formulas
+           cos(φ0 + ψ) = cos φ0 cos ψ - sin φ0 sin ψ
+           sin(φ0 + ψ) = sin φ0 cos ψ + cos φ0 sin ψ
+       we get
+           P - c = cos(φ0 + ψ) U + sin(φ0 + ψ) V
+                 = cos ψ · (cos φ0 U + sin φ0 V) + sin ψ · (-sin φ0 U + cos φ0 V)
+                 = cos ψ · K + sin ψ · L.
+       K and L are perpendicular: P'(φ) = -sin φ U + cos φ V is exactly P(φ + π/2) - c.
+       |P - c|² has derivative 2 (P - c)·P', which is zero at the extremum φ0, so
+       K · P'(φ0) = K · L = 0.
+
+§4 Foci
+
+   4.1 Distance of the foci from the center.
+       The foci lie on the major axis, on either side of the center, at distance
+           f = sqrt(A² - B²) = sqrt(r)          (A² - B² = r, see 3.2).
+       For a circle a = b and d = 0, so r = 0 and both foci are the center.
+
+   4.2 The major axis direction without any trig.
+       We need the vector W = K = x·U + y·V, where (x, y) = (cos φ0, sin φ0).
+       Note |x·U + y·V|² = x²a + 2xy·d + y²b, the quadratic form of the table
+           G = [ a  d ]
+               [ d  b ]
+       evaluated at (x, y). By 3.2, (x, y) maximizes it among unit (x, y), and the maximum
+       is A². This is the "largest eigenvalue" problem: (x, y) satisfies
+       G·(x, y) = λ·(x, y) with λ = A². We check this directly:
+         * Eigenvalues solve det(G - λI) = 0, i.e. (a - λ)(b - λ) - d² = 0, i.e.
+               λ² - (a + b)λ + (ab - d²) = 0
+               λ = ((a + b) ± sqrt((a + b)² - 4(ab - d²))) / 2
+                 = ((a + b) ± sqrt((a - b)² + 4d²)) / 2 = (a + b ± r)/2,
+           which are exactly A² and B² from 3.2.
+         * For λ = A², the two rows of G·(x, y) = λ·(x, y) read
+               (a - λ)x + d·y = 0   =>   (x, y) ∝ (d, λ - a)
+               d·x + (b - λ)y = 0   =>   (x, y) ∝ (λ - b, d).
+           Both describe the same direction because det(G - λI) = 0.
+       With λ - b = (a - b + r)/2 and λ - a = (b - a + r)/2, one of the two candidates
+       always has a component of at least r/2 (the first if a >= b, the second otherwise),
+       which avoids subtracting two nearly equal numbers. We pick that one. No
+       normalization of (x, y) is needed, see 4.3.
+
+   4.3 Normalizing W without computing its length separately.
+       Because G·(x, y) = λ·(x, y),
+           |W|² = (x, y)·G·(x, y) = λ·(x² + y²).
+       The unit major direction is W / sqrt(λ(x² + y²)), so the focal offset is
+           f · W / |W| = W · sqrt(r) / sqrt(λ(x² + y²)) = W · sqrt(r / (λ(x² + y²))),
+       and the foci are c + offset and c - offset.
+
+§5 Bounding box
+
+   Work one coordinate at a time. Let ui = U[i], vi = V[i]. That coordinate is
+       P_i(φ) = c_i + ui · cos φ + vi · sin φ.
+
+   5.1 Extrema of a coordinate are where its derivative is zero:
+           dP_i/dφ = -ui · sin φ + vi · cos φ = 0   =>   ui · sin φ = vi · cos φ.
+       This says the vector (cos φ, sin φ) is parallel to (ui, vi), so there are two
+       solutions, half a turn apart:
+           (cos φ, sin φ) = +(ui, vi)/n   and   (cos φ, sin φ) = -(ui, vi)/n,
+       where n = sqrt(ui² + vi²).
+
+   5.2 The value of the coordinate at each solution.
+           +: P_i = c_i + ui·(ui/n) + vi·(vi/n) = c_i + (ui² + vi²)/n = c_i + n   (maximum)
+           -: P_i = c_i - n                                                       (minimum)
+       If n = 0 (the arc is flat along this coordinate) there is no extremum to find, and
+       the endpoints already give the right answer.
+
+   5.3 Is a solution inside the arc, i.e. is φ in [0, θ]?
+       We avoid computing φ by looking at signs. For an angle φ:
+           φ is "past the start" when sin φ >= 0 (φ in [0, π]),
+           φ is "before the end" when sin(θ - φ) >= 0.
+       Expand the second one with sin(x - y) = sin x cos y - cos x sin y:
+           sin(θ - φ) = sin θ · cos φ - cos θ · sin φ.
+       For the + solution, sin φ = vi/n and cos φ = ui/n. Dropping the positive factor
+       1/n, which does not change a sign:
+           sign(sin φ)       = sign(vi)
+           sign(sin(θ - φ))  = sign(sin θ · ui - cos θ · vi)
+       The - solution has both signs flipped.
+       If θ <= π, φ is in [0, θ] exactly when BOTH conditions hold: the arc is no longer
+       than half a turn, so being past the start and before the end pins it down.
+       If θ > π, the two conditions each cover a part of the arc and overlap, so EITHER
+       one is enough.
+       Using strict inequalities is fine: an extremum exactly at an endpoint is already
+       counted by the endpoints.
+
+   5.4 Start from the box of the two endpoints, and widen it by each extremum that lies
+       inside the arc. The sqrt in 5.2 is only evaluated when needed.
+
+§6 Length
+
+   6.1 Speed along the curve.
+       Differentiate the axis frame form in 3.3 with respect to ψ (equivalently φ):
+           P' = -sin ψ · K + cos ψ · L.
+       Because K ⟂ L, the squared length has no cross term:
+           |P'|² = sin²ψ |K|² + cos²ψ |L|² = A² sin²ψ + B² cos²ψ.
+
+   6.2 Arc length is the integral of speed.
+       ψ runs from -φ0 (at φ = 0) to θ - φ0 (at φ = θ), so
+           length = ∫ sqrt(A² sin²ψ + B² cos²ψ) dψ   over ψ in [-φ0, θ - φ0].
+
+   6.3 Put it in the standard form of an elliptic integral.
+       Substitute t = ψ + π/2. Then sin ψ = -cos t and cos ψ = sin t, so
+           A² sin²ψ + B² cos²ψ = A² cos²t + B² sin²t.
+       Let q = B²/A² (in [0, 1]) and m = 1 - q. Using cos²t = 1 - sin²t:
+           A² cos²t + B² sin²t = A² (1 - sin²t + q sin²t) = A² (1 - m sin²t).
+       Define E(t) = ∫ from 0 to t of sqrt(1 - m sin²w) dw. Then
+           length = A · (E(t1) - E(t0)),
+           t0 = π/2 - φ0,   t1 = t0 + θ.
+       When the ellipse is a circle, m = 0, E(t) = t, and the length is A · θ.
+
+   6.4 Reduce t to the range where the formulas below are valid.
+       The integrand sqrt(1 - m sin²w) has period π (sin² has period π), and is symmetric
+       about w = π/2 (sin²(π - w) = sin²w). Hence the integral over one full period
+       [0, π] is 2 E_c, where E_c = E(π/2) is the "complete" integral. Write
+           t = n π + y,  n = round(t / π),  y in [-π/2, π/2],
+       then E(t) = 2 n E_c + E(y). Here t is always positive: φ0 is in (-π/2, π/2], so t0
+       is in [0, π), and t1 = t0 + θ < 3π, so n >= 0 and n is small.
+
+   6.5 Evaluate E(y) with Carlson's integrals.
+       Carlson's symmetric integrals R_F and R_D (see `carlson_rf`, `carlson_rd`) satisfy
+       the standard identity (DLMF 19.25.9, not rederived here), for |y| <= π/2 with
+       s = sin y, c = cos y:
+           E(y) = s · R_F(c², Δ, 1) - (m/3) · s³ · R_D(c², Δ, 1),
+           Δ = 1 - m s² = c² + q s²    (the second form has no cancellation).
+       The complete integral is the same formula at y = π/2 (s = 1, c = 0):
+           E_c = R_F(0, q, 1) - (m/3) · R_D(0, q, 1).
+       R_F needs at most one zero argument, so q must be positive. A degenerate ellipse
+       (B = 0, a back-and-forth line) is handled by clamping q to ε², which changes the
+       length by far less than the rounding error.
+
+   6.6 Why no tolerance is needed.
+       Both R_F and R_D repeat a step that shrinks the relative spread of their arguments
+       by a factor of 4. Once the spread is below a fixed threshold, a short Taylor series
+       finishes the job, and its truncation error is below 1e-16 (see `carlson_rf`). The
+       stopping test is the error bound itself.
+*/
+
 impl<const DIM: usize, A: Adaptor<DIM>> EllipticArc<DIM, A> {
     pub fn from_projected_arc(
         arc: &Arc<DIM, A>,
@@ -521,8 +720,71 @@ impl<const DIM: usize, A: Adaptor<DIM>> EllipticArc<DIM, A> {
         (A::scalar(0.0), A::scalar(1.0))
     }
 
-    pub fn length(&self) -> A::Scalar {
-        todo!();
+    /// Arc length. There is no elementary closed form for an ellipse; this evaluates the
+    /// incomplete elliptic integral of the second kind with Carlson's algorithm, which
+    /// converges to the full precision of the scalar type with no tolerance parameter.
+    pub fn length(&self) -> A::Scalar
+    where
+        A: TrigonometryAdaptor,
+    {
+        // See ELLIPSE ARC MATH §6.
+        let (sin_h, cos_h) = A::sin_cos(self.angle * A::scalar(0.5));
+        if sin_h < A::epsilon() {
+            // Degenerate arc. The chord is the length, to within rounding.
+            return A::vector_length(self.end_vec - self.start_vec);
+        }
+        // U and V (§1, §2), then a, b, d, r (§3).
+        let u = self.start_vec;
+        let v = (self.mid_vec - u * cos_h) / sin_h;
+        let a = A::dot_product(u, u);
+        let b = A::dot_product(v, v);
+        let d = A::dot_product(u, v);
+        let diff = a - b;
+        let half = A::scalar(0.5);
+        let r = A::sqrt(diff * diff + A::scalar(4.0) * d * d);
+        if r <= A::epsilon() * (a + b) {
+            // Circle (to within precision). Constant speed.
+            return A::sqrt((a + b) * half) * self.angle;
+        }
+        let lambda = (a + b + r) * half; // A², §3.2
+        // q = B²/A² = (a b - d²)/A⁴ by §3.2. Clamped away from zero, see §6.5.
+        let det = A::max(a * b - d * d, A::scalar(0.0));
+        let q = A::clamp(
+            det / (lambda * lambda),
+            A::epsilon() * A::epsilon(),
+            A::scalar(1.0),
+        );
+        let m = A::scalar(1.0) - q;
+        // Integration limits (§6.3), each split as t = n π + y with |y| <= π/2 (§6.4).
+        let t0 = A::scalar(PI * 0.5) - half * A::atan2(A::scalar(2.0) * d, diff);
+        let t1 = t0 + self.angle;
+        let inv_pi = A::scalar(1.0 / PI);
+        let reduce = |t: A::Scalar| {
+            let n = A::to_usize(t * inv_pi + half);
+            (n, t - A::scalar(n as f64 * PI))
+        };
+        let (n0, y0) = reduce(t0);
+        let (n1, y1) = reduce(t1);
+        let third_m = m * A::scalar(1.0 / 3.0);
+        // E(y) in terms of Carlson's integrals (§6.5).
+        let incomplete = |y: A::Scalar| {
+            let (s, c) = A::sin_cos(y);
+            let c2 = c * c;
+            let delta = c2 + q * s * s;
+            let one = A::scalar(1.0);
+            s * carlson_rf::<A>(c2, delta, one)
+                - third_m * s * s * s * carlson_rd::<A>(c2, delta, one)
+        };
+        let mut total = incomplete(y1) - incomplete(y0);
+        if n1 > n0 {
+            // Every whole period between the limits adds 2 E_c (§6.4, §6.5).
+            let zero = A::scalar(0.0);
+            let one = A::scalar(1.0);
+            let complete = carlson_rf::<A>(zero, q, one) - third_m * carlson_rd::<A>(zero, q, one);
+            total += A::scalar(2.0 * (n1 - n0) as f64) * complete;
+        }
+        // length = A · (E(t1) - E(t0)), §6.3.
+        A::sqrt(lambda) * total
     }
 
     pub fn center(&self) -> A::Vector {
@@ -534,89 +796,12 @@ impl<const DIM: usize, A: Adaptor<DIM>> EllipticArc<DIM, A> {
     where
         A: TrigonometryAdaptor,
     {
-        /*
-        DERIVATION
-
-        Notation: c = center, S = start_vec, M = mid_vec, θ = angle, h = θ/2.
-        "·" is the dot product, |x|² = x·x.
-
-        1. The ellipse as a swept loop.
-           Every point on the (full) ellipse is
-               P(φ) = c + cos φ · U + sin φ · V,
-           for some pair of vectors U, V and a parameter angle φ. U and V need not be
-           perpendicular, so they are generally NOT the axes of the ellipse.
-           This arc starts at φ = 0, passes M at φ = h, and ends at φ = θ, so
-               U = S,        M = cos h · U + sin h · V.
-
-        2. Recover V from M.
-           Subtract cos h · U from both sides of the second equation and divide by sin h:
-               V = (M - cos h · S) / sin h.
-           (Using M and not the end vector keeps the divisor sin h, which is only zero
-           for an empty arc. The end vector would need sin θ, which is zero at a
-           semicircle.)
-
-        3. Squared distance from the center, as a function of φ.
-           Let a = U·U, b = V·V, d = U·V. Expanding P(φ) - c = cos φ U + sin φ V:
-               |P - c|² = cos²φ · a + 2 sin φ cos φ · d + sin²φ · b.
-           Use the double-angle identities
-               cos²φ = (1 + cos 2φ)/2,   sin²φ = (1 - cos 2φ)/2,   2 sin φ cos φ = sin 2φ:
-               |P - c|² = (a + b)/2 + ((a - b)/2) · cos 2φ + d · sin 2φ.
-
-        4. Collapse the cos/sin pair into one cosine.
-           Let r = sqrt((a - b)² + 4d²). Then ((a-b)/r, 2d/r) is a point on the unit
-           circle, so there is an angle φ0 with
-               cos 2φ0 = (a - b)/r,   sin 2φ0 = 2d/r.
-           Substitute (a - b) = r cos 2φ0 and 2d = r sin 2φ0 into step 3:
-               ((a-b)/2) cos 2φ + d sin 2φ
-                   = (r/2) (cos 2φ0 cos 2φ + sin 2φ0 sin 2φ)
-                   = (r/2) cos(2φ - 2φ0)           [cos(x - y) = cos x cos y + sin x sin y]
-           so
-               |P - c|² = (a + b)/2 + (r/2) · cos(2(φ - φ0)).
-           A cosine ranges over [-1, 1], hence
-               farthest point:  φ = φ0,        |P - c|² = A² = (a + b + r)/2,
-               nearest point:   φ = φ0 + π/2,  |P - c|² = B² = (a + b - r)/2.
-           The farthest point is the end of the semi-major axis (length A), the nearest
-           the end of the semi-minor axis (length B).
-
-        5. The foci.
-           The foci lie on the major axis, on either side of the center, at distance
-               f = sqrt(A² - B²).
-           From step 4, A² - B² = r, so f = sqrt(r).
-           For a circle a = b and d = 0, so r = 0 and both foci are the center.
-
-        6. The major axis direction without any trig.
-           We need the vector W = P(φ0) - c = x·U + y·V, where (x, y) = (cos φ0, sin φ0).
-           Note |x·U + y·V|² = x²a + 2xy·d + y²b, i.e. the quadratic form of the table
-               G = [ a  d ]
-                   [ d  b ]
-           evaluated at (x, y). Step 4 says (x, y) maximizes it among unit (x, y) and
-           that the maximum is A². This is the "largest eigenvalue" problem: (x, y)
-           satisfies G·(x, y) = λ·(x, y) with λ = A². We check this directly:
-             * Eigenvalues solve det(G - λI) = 0, i.e. (a - λ)(b - λ) - d² = 0, i.e.
-                   λ² - (a + b)λ + (ab - d²) = 0
-                   λ = ((a + b) ± sqrt((a + b)² - 4(ab - d²))) / 2
-                     = ((a + b) ± sqrt((a - b)² + 4d²)) / 2 = (a + b ± r)/2,
-               which are exactly A² and B² from step 4.
-             * For λ = A², the two rows of G·(x, y) = λ·(x, y) read
-                   (a - λ)x + d·y = 0   =>   (x, y) ∝ (d, λ - a)
-                   d·x + (b - λ)y = 0   =>   (x, y) ∝ (λ - b, d).
-               Both describe the same direction because det(G - λI) = 0.
-           With λ - b = (a - b + r)/2 and λ - a = (b - a + r)/2, one of the two
-           candidates always has a component of at least r/2 (the first if a >= b, the
-           second otherwise), which avoids subtracting two nearly equal numbers. We
-           pick that one. No normalization of (x, y) is needed, see step 7.
-
-        7. Normalizing W without computing its length separately.
-           Because G·(x, y) = λ·(x, y),
-               |W|² = (x, y)·G·(x, y) = λ·(x² + y²).
-           The unit major direction is W / sqrt(λ(x² + y²)), so the focal offset is
-               f · W / |W| = W · sqrt(r) / sqrt(λ(x² + y²)) = W · sqrt(r / (λ(x² + y²))),
-           and the foci are c + offset and c - offset.
-        */
+        // See ELLIPSE ARC MATH §4.
         let (sin_h, cos_h) = A::sin_cos(self.angle * A::scalar(0.5));
         if sin_h < A::epsilon() {
             return (self.center, self.center);
         }
+        // U and V (§1, §2), then a, b, d, r (§3).
         let u = self.start_vec;
         let v = (self.mid_vec - u * cos_h) / sin_h;
         let a = A::dot_product(u, u);
@@ -629,12 +814,14 @@ impl<const DIM: usize, A: Adaptor<DIM>> EllipticArc<DIM, A> {
             return (self.center, self.center);
         }
         let half = A::scalar(0.5);
-        let lambda = (a + b + r) * half;
+        let lambda = (a + b + r) * half; // A², §3.2
+        // Major axis direction as x·U + y·V, using the better-conditioned eigenvector (§4.2).
         let (x, y) = if diff >= A::scalar(0.0) {
             ((diff + r) * half, d)
         } else {
             (d, (r - diff) * half)
         };
+        // Distance sqrt(r) along the unit major direction (§4.1, §4.3).
         let offset = (u * x + v * y) * A::sqrt(r / (lambda * (x * x + y * y)));
         (self.center + offset, self.center - offset)
     }
@@ -696,48 +883,8 @@ impl<const DIM: usize, A: Adaptor<DIM>> EllipticArc<DIM, A> {
     where
         A: TrigonometryAdaptor,
     {
-        // DERIVATION
-        //
-        // Notation as in `focii`: the arc is P(φ) = c + cos φ · U + sin φ · V for φ in
-        // [0, θ], with U = start_vec and V = (mid_vec - cos(θ/2) · U) / sin(θ/2).
-        // See `focii` for why.
-        //
-        // 1. Work one coordinate at a time. Let p = U[i], q = V[i]. That coordinate is
-        //        P_i(φ) = c_i + p · cos φ + q · sin φ.
-        //
-        // 2. Extrema of a coordinate are where its derivative is zero:
-        //        dP_i/dφ = -p · sin φ + q · cos φ = 0   =>   p · sin φ = q · cos φ.
-        //    This says the vector (cos φ, sin φ) is parallel to (p, q), so there are two
-        //    solutions, half a turn apart:
-        //        (cos φ, sin φ) = +(p, q)/n   and   (cos φ, sin φ) = -(p, q)/n,
-        //    where n = sqrt(p² + q²).
-        //
-        // 3. The value of the coordinate at each solution.
-        //        +: P_i = c_i + p·(p/n) + q·(q/n) = c_i + (p² + q²)/n = c_i + n   (maximum)
-        //        -: P_i = c_i - n                                                  (minimum)
-        //    If n = 0 (the arc is flat along this coordinate) there is no extremum to
-        //    find, and the endpoints already give the right answer.
-        //
-        // 4. Is a solution inside the arc, i.e. is φ in [0, θ]?
-        //    We avoid computing φ by looking at signs. For an angle φ:
-        //        φ is "past the start" when sin φ >= 0 (φ in [0, π]),
-        //        φ is "before the end" when sin(θ - φ) >= 0.
-        //    Expand the second one with sin(x - y) = sin x cos y - cos x sin y:
-        //        sin(θ - φ) = sin θ · cos φ - cos θ · sin φ.
-        //    For the + solution, sin φ = q/n and cos φ = p/n. Dropping the positive factor
-        //    1/n, which does not change a sign:
-        //        sign(sin φ)       = sign(q)
-        //        sign(sin(θ - φ))  = sign(sin θ · p - cos θ · q)
-        //    The - solution has both signs flipped.
-        //    If θ <= π, φ is in [0, θ] exactly when BOTH conditions hold: the arc is no
-        //    longer than half a turn, so being past the start and before the end pins it.
-        //    If θ > π, the two conditions each cover a part of the arc and overlap, so
-        //    EITHER one is enough.
-        //    Using strict inequalities is fine: an extremum exactly at an endpoint is
-        //    already counted by the endpoints.
-        //
-        // 5. Start from the box of the two endpoints, and widen it by each extremum
-        //    that lies inside the arc. The sqrt in step 3 is only evaluated when needed.
+        // See ELLIPSE ARC MATH §5. Start from the endpoints (§5.4), then widen by the
+        // extrema that lie inside the arc.
         let start = A::coord_arr(self.center + self.start_vec);
         let end = A::coord_arr(self.center + self.end_vec);
         let mut min: [A::Scalar; DIM] = std::array::from_fn(|i| A::min(start[i], end[i]));
@@ -747,6 +894,7 @@ impl<const DIM: usize, A: Adaptor<DIM>> EllipticArc<DIM, A> {
             // Degenerate arc. The endpoints are the whole story.
             return (A::vector(min), A::vector(max));
         }
+        // U and V (§1, §2).
         let u = self.start_vec;
         let v = (self.mid_vec - u * cos_h) / sin_h;
         let (sin_t, cos_t) = A::sin_cos(self.angle);
@@ -756,9 +904,10 @@ impl<const DIM: usize, A: Adaptor<DIM>> EllipticArc<DIM, A> {
         let u = A::coord_arr(u);
         let v = A::coord_arr(v);
         for i in 0..DIM {
-            let (p, q) = (u[i], v[i]);
-            let past_start = q;
-            let before_end = sin_t * p - cos_t * q;
+            let (ui, vi) = (u[i], v[i]);
+            // Sign tests for "extremum is inside the arc" (§5.3).
+            let past_start = vi;
+            let before_end = sin_t * ui - cos_t * vi;
             let (max_in, min_in) = if short {
                 (
                     past_start > zero && before_end > zero,
@@ -771,7 +920,8 @@ impl<const DIM: usize, A: Adaptor<DIM>> EllipticArc<DIM, A> {
                 )
             };
             if max_in || min_in {
-                let n = A::sqrt(p * p + q * q);
+                // Extremal values are c_i ± n (§5.2).
+                let n = A::sqrt(ui * ui + vi * vi);
                 if max_in {
                     max[i] = A::max(max[i], center[i] + n);
                 }
@@ -1177,6 +1327,95 @@ fn slerp_with_deriv_unchecked<A: TrigonometryAdaptor>(
         [(sin0 * inv_sin), (sin1 * inv_sin)],
         [(-cos0 * angle * inv_sin), (cos1 * angle * inv_sin)],
     ]
+}
+
+/// Maximum iterations for the Carlson duplication loops. Ordinary ellipses need 5-7 steps and
+/// the flattest representable one (q clamped to ε², f64) needs 10, so this is only reached
+/// for non-finite input. It guarantees termination.
+const CARLSON_MAX_ITER: usize = 16;
+
+/// Carlson's symmetric elliptic integral of the first kind,
+/// R_F(x, y, z) = (1/2) ∫ from 0 to ∞ of dt / sqrt((t + x)(t + y)(t + z)).
+/// Requires x, y, z >= 0 with at most one of them zero.
+///
+/// Duplication theorem: R_F(x, y, z) = R_F(x', y', z') where, with
+/// λ = sqrt(x)sqrt(y) + sqrt(y)sqrt(z) + sqrt(z)sqrt(x), each argument becomes (x + λ)/4.
+/// Each step shrinks the relative spread of the arguments around their mean by about 4.
+/// Once the spread is below 0.0025, a Taylor series in the spread, truncated after the
+/// fifth order, has error below 0.0025⁶ / 4 ≈ 6e-17.
+fn carlson_rf<A: ScalarAdaptor>(x: A::Float, y: A::Float, z: A::Float) -> A::Float {
+    const ERRTOL: f64 = 0.0025;
+    let (mut x, mut y, mut z) = (x, y, z);
+    let third = A::scalar(1.0 / 3.0);
+    let quarter = A::scalar(0.25);
+    let tol = A::scalar(ERRTOL);
+    let mut iter = 0;
+    loop {
+        let ave = (x + y + z) * third;
+        let (dx, dy, dz) = ((ave - x) / ave, (ave - y) / ave, (ave - z) / ave);
+        let spread = A::max(A::abs(dx), A::max(A::abs(dy), A::abs(dz)));
+        if spread < tol || iter >= CARLSON_MAX_ITER {
+            let e2 = dx * dy - dz * dz;
+            let e3 = dx * dy * dz;
+            let series = A::scalar(1.0)
+                + (e2 * A::scalar(1.0 / 24.0) - A::scalar(0.1) - e3 * A::scalar(3.0 / 44.0)) * e2
+                + e3 * A::scalar(1.0 / 14.0);
+            return series / A::sqrt(ave);
+        }
+        let (sx, sy, sz) = (A::sqrt(x), A::sqrt(y), A::sqrt(z));
+        let lambda = sx * (sy + sz) + sy * sz;
+        x = (x + lambda) * quarter;
+        y = (y + lambda) * quarter;
+        z = (z + lambda) * quarter;
+        iter += 1;
+    }
+}
+
+/// Carlson's symmetric elliptic integral of the second kind,
+/// R_D(x, y, z) = (3/2) ∫ from 0 to ∞ of dt / ((t + z) sqrt((t + x)(t + y)(t + z))).
+/// Requires x, y >= 0 with at most one of them zero, and z > 0.
+///
+/// Uses the same duplication step as `carlson_rf`, accumulating a running sum. The
+/// termination threshold is 0.0015 and the truncation error of the series is below
+/// 0.0015⁶ ≈ 1e-17.
+fn carlson_rd<A: ScalarAdaptor>(x: A::Float, y: A::Float, z: A::Float) -> A::Float {
+    const ERRTOL: f64 = 0.0015;
+    let (mut x, mut y, mut z) = (x, y, z);
+    let quarter = A::scalar(0.25);
+    let tol = A::scalar(ERRTOL);
+    let mut sum = A::scalar(0.0);
+    let mut fac = A::scalar(1.0);
+    let mut iter = 0;
+    loop {
+        let ave = (x + y + z * A::scalar(3.0)) * A::scalar(0.2);
+        let (dx, dy, dz) = ((ave - x) / ave, (ave - y) / ave, (ave - z) / ave);
+        let spread = A::max(A::abs(dx), A::max(A::abs(dy), A::abs(dz)));
+        if spread < tol || iter >= CARLSON_MAX_ITER {
+            let c1 = A::scalar(3.0 / 14.0);
+            let c2 = A::scalar(1.0 / 6.0);
+            let c3 = A::scalar(9.0 / 22.0);
+            let c4 = A::scalar(3.0 / 26.0);
+            let c5 = c3 * quarter;
+            let c6 = c4 * A::scalar(1.5);
+            let ea = dx * dy;
+            let eb = dz * dz;
+            let ec = ea - eb;
+            let ed = ea - eb * A::scalar(6.0);
+            let ee = ed + ec + ec;
+            let series = A::scalar(1.0)
+                + ed * (-c1 + c5 * ed - c6 * dz * ee)
+                + dz * (c2 * ee + dz * (-c3 * ec + dz * c4 * ea));
+            return sum * A::scalar(3.0) + fac * series / (ave * A::sqrt(ave));
+        }
+        let (sx, sy, sz) = (A::sqrt(x), A::sqrt(y), A::sqrt(z));
+        let lambda = sx * (sy + sz) + sy * sz;
+        sum += fac / (sz * (z + lambda));
+        fac *= quarter;
+        x = (x + lambda) * quarter;
+        y = (y + lambda) * quarter;
+        z = (z + lambda) * quarter;
+        iter += 1;
+    }
 }
 
 #[cfg(test)]
@@ -3390,6 +3629,213 @@ mod test {
         let (lo, hi) = earc.bounds();
         let (rlo, rhi) = earc.reversed().bounds();
         assert!((lo - rlo).length() < 1e-9 && (hi - rhi).length() < 1e-9);
+    }
+
+    // ===================== EllipticArc::length =====================
+
+    /// Reference length: Simpson's rule on |dP/dt| over t in [0, 1] with `n` (even) steps.
+    fn simpson_length(earc: &EllipticArc3d, n: usize) -> f64 {
+        let speed = |i: usize| earc.tangent(i as f64 / n as f64).unwrap().length();
+        let mut sum = speed(0) + speed(n);
+        for i in 1..n {
+            sum += speed(i) * if i % 2 == 1 { 4.0 } else { 2.0 };
+        }
+        sum / (3.0 * n as f64)
+    }
+
+    fn assert_length_matches_integration(earc: &EllipticArc3d, n: usize, tol: f64, label: &str) {
+        let expected = simpson_length(earc, n);
+        let actual = earc.length();
+        assert!(
+            (actual - expected).abs() <= tol * expected,
+            "{label}: length {actual} != {expected} (rel err {})",
+            (actual - expected).abs() / expected
+        );
+    }
+
+    #[test]
+    fn t_elliptic_length_circle() {
+        let c = DVec([1.0, 2.0, 3.0]);
+        for theta in [0.1, 1.0, PI, 4.0, 6.0] {
+            let earc = swept_arc(c, DVec([2.0, 0.0, 0.0]), DVec([0.0, 2.0, 0.0]), theta);
+            assert!(
+                (earc.length() - 2.0 * theta).abs() < 1e-12,
+                "theta={theta}: {}",
+                earc.length()
+            );
+        }
+        // From a circular Arc, including a major arc.
+        let arc = Arc3d::from_three_points(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([0.0, -1.0, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+        )
+        .unwrap();
+        let earc: EllipticArc3d = (&arc).into();
+        assert!((earc.length() - arc.length()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn t_elliptic_length_tilted_pairs() {
+        let c = DVec([0.5, -1.0, 2.0]);
+        let u = DVec([1.0, 0.0, 0.0]);
+        let v = DVec([1.0, 1.0, 0.0]);
+        for theta in [0.01, 0.3, 1.0, PI / 2.0, 2.0, PI, 3.5, 4.0, 5.0, 5.5, 6.2] {
+            assert_length_matches_integration(
+                &swept_arc(c, u, v, theta),
+                200_000,
+                1e-11,
+                &format!("theta={theta}"),
+            );
+        }
+    }
+
+    #[test]
+    fn t_elliptic_length_out_of_plane_vectors() {
+        let c = DVec([-3.0, 4.0, 1.0]);
+        let u = DVec([2.0, -1.0, 0.5]);
+        let v = DVec([0.3, 1.7, -2.2]);
+        for theta in [0.4, 1.2, PI, 2.8, 4.4, 5.9] {
+            assert_length_matches_integration(
+                &swept_arc(c, u, v, theta),
+                200_000,
+                1e-11,
+                &format!("theta={theta}"),
+            );
+        }
+    }
+
+    #[test]
+    fn t_elliptic_length_every_start_phase() {
+        // Rotating the start around the ellipse moves the arc across the axes, which
+        // exercises every branch of the range reduction.
+        let c = DVec([0.0, 0.0, 0.0]);
+        let u0 = DVec([3.0, 0.0, 0.0]);
+        let v0 = DVec([0.0, 1.0, 0.0]);
+        for theta in [1.0, PI, 4.5, 6.0] {
+            for k in 0..24 {
+                let phase = TAU * k as f64 / 24.0;
+                let (s, co) = phase.sin_cos();
+                let u = u0 * co + v0 * s;
+                let v = v0 * co - u0 * s;
+                assert_length_matches_integration(
+                    &swept_arc(c, u, v, theta),
+                    50_000,
+                    1e-11,
+                    &format!("theta={theta} phase={phase}"),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn t_elliptic_length_projected_arc() {
+        let normal = DVec([1.0, 1.0, 1.0]).normalize();
+        let minor = Arc3d::from_three_points(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([FRAC_1_SQRT_2, FRAC_1_SQRT_2, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+        )
+        .unwrap();
+        let major = Arc3d::from_three_points(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([0.0, -1.0, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+        )
+        .unwrap();
+        for (arc, label) in [(minor, "minor"), (major, "major")] {
+            let earc =
+                EllipticArc3d::from_projected_arc(&arc, DVec([0.0, 0.0, 1.0]), normal).unwrap();
+            assert_length_matches_integration(&earc, 200_000, 1e-11, label);
+        }
+    }
+
+    #[test]
+    fn t_elliptic_length_thin_ellipses() {
+        // Semi-axes 1 and ratio 1e-2, 1e-4, 1e-6: the speed has a sharp dip that the
+        // reference integration only resolves for the milder ratios.
+        for (ratio, n, tol) in [(1e-2, 200_000, 1e-10), (1e-4, 2_000_000, 1e-7)] {
+            for theta in [1.0, 4.0] {
+                let earc = swept_arc(
+                    DVec([0.0, 0.0, 0.0]),
+                    DVec([1.0, 0.0, 0.0]),
+                    DVec([0.0, ratio, 0.0]),
+                    theta,
+                );
+                assert_length_matches_integration(&earc, n, tol, &format!("ratio={ratio}"));
+            }
+        }
+        // Extremely thin: bounded by the line length 4A, and by the semi-major sweep.
+        let earc = swept_arc(
+            DVec([0.0, 0.0, 0.0]),
+            DVec([1.0, 0.0, 0.0]),
+            DVec([0.0, 1e-9, 0.0]),
+            3.0,
+        );
+        let expected = 1.0 - 3f64.cos(); // ∫ |sin φ| dφ over [0, 3]
+        assert!((earc.length() - expected).abs() < 1e-8, "{}", earc.length());
+    }
+
+    #[test]
+    fn t_elliptic_length_degenerate_line() {
+        // V = 0: the "ellipse" is a segment of length 5 traversed back and forth.
+        // P = (5 cos φ, 0, 0), speed 5|sin φ|, so length = 5 (1 - cos 3) for φ in [0, 3].
+        let earc = swept_arc(
+            DVec([0.0, 0.0, 0.0]),
+            DVec([5.0, 0.0, 0.0]),
+            DVec([0.0, 0.0, 0.0]),
+            3.0,
+        );
+        let expected = 5.0 * (1.0 - 3f64.cos());
+        assert!(
+            (earc.length() - expected).abs() < 1e-9,
+            "{} != {expected}",
+            earc.length()
+        );
+    }
+
+    #[test]
+    fn t_elliptic_length_additive() {
+        // Splitting the sweep at its middle: the two halves add up to the whole.
+        let c = DVec([0.0, 1.0, 0.0]);
+        let u = DVec([2.0, 0.5, 0.0]);
+        let v = DVec([-0.3, 1.1, 0.7]);
+        for theta in [1.0f64, 3.0, 5.0] {
+            let h = theta / 2.0;
+            let (s, co) = h.sin_cos();
+            let first = swept_arc(c, u, v, h);
+            let second = swept_arc(c, u * co + v * s, v * co - u * s, h);
+            let sum = first.length() + second.length();
+            let whole = swept_arc(c, u, v, theta).length();
+            assert!((sum - whole).abs() < 1e-12 * whole, "theta={theta}: {sum} vs {whole}");
+        }
+    }
+
+    #[test]
+    fn t_elliptic_length_f32() {
+        // Same arc in single precision: the Carlson loops must terminate and agree with f64.
+        let at = |phi: f64| (DVec([phi.cos() + phi.sin(), 0.4 * phi.sin(), 0.0]));
+        let theta = 4.0;
+        let wide = swept_arc(
+            DVec([0.0, 0.0, 0.0]),
+            DVec([1.0, 0.0, 0.0]),
+            DVec([1.0, 0.4, 0.0]),
+            theta,
+        );
+        let narrow = |v: DVec3| crate::Vec::<3>([v.0[0] as f32, v.0[1] as f32, v.0[2] as f32]);
+        let earc = EllipticArc3f {
+            center: narrow(DVec([0.0, 0.0, 0.0])),
+            start_vec: narrow(at(0.0)),
+            mid_vec: narrow(at(theta / 2.0)),
+            end_vec: narrow(at(theta)),
+            angle: theta as f32,
+        };
+        let expected = wide.length();
+        let actual = earc.length() as f64;
+        assert!(
+            (actual - expected).abs() < 1e-4 * expected,
+            "f32 length {actual} vs f64 {expected}"
+        );
     }
 
     // ===================== EllipticArc::point and tangent =====================
