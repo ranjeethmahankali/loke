@@ -1405,13 +1405,20 @@ impl Scene for CurveScene {
             Vec3::new(7.0, 0.0, 0.0), // axis-start
             Vec3::new(8.0, 0.0, 0.0), // axis-end
             Vec3::new(7.0, 3.0, 0.0), // arc-start
-            // Elliptic arc - center-start-end, drawn both ways round.
-            Vec3::new(-1.0, -5.0, 0.0), // center
-            Vec3::new(2.5, -4.6, 0.0),  // start
-            Vec3::new(-1.3, -3.4, 0.0), // end
-            // Elliptic arc - the three-point arc projected onto a tilted plane.
-            Vec3::new(-3.0, 0.0, -2.0), // plane point
-            Vec3::new(-2.2, 0.9, -1.1), // plane point + normal
+            // Elliptic arc - center-start-end, minor.
+            Vec3::new(-2.5, -5.0, 0.0), // center
+            Vec3::new(0.5, -5.3, 0.0),  // start
+            Vec3::new(-2.8, -3.6, 0.0), // end
+            // Elliptic arc - center-start-end, major (flipped).
+            Vec3::new(3.5, -5.0, 0.0), // center
+            Vec3::new(5.5, -4.4, 0.0), // start
+            Vec3::new(3.0, -3.2, 0.0), // end
+            // Elliptic arc - a three-point arc projected onto the plane through its
+            // center, with the normal pointing from the center toward the last point.
+            Vec3::new(7.5, -5.0, 0.0),  // start
+            Vec3::new(9.0, -3.5, 0.0),  // middle
+            Vec3::new(10.5, -5.0, 0.0), // end
+            Vec3::new(10.0, -4.5, 1.2), // normal tip
         ])
     }
 
@@ -1435,10 +1442,6 @@ impl Scene for CurveScene {
         arcs.clear();
         ellipses.clear();
         if let Ok(arc) = Arc::from_three_points(inputs[5], inputs[6], inputs[7]) {
-            match EllipticArc::from_projected_arc(&arc, inputs[17], inputs[18] - inputs[17]) {
-                Ok(earc) => ellipses.push(earc),
-                Err(e) => eprintln!("Projected elliptic arc failed: {e:?}"),
-            }
             arcs.push(arc);
         }
         match Arc::from_start_tangent_end(inputs[8], inputs[9] - inputs[8], inputs[10]) {
@@ -1454,11 +1457,23 @@ impl Scene for CurveScene {
             Err(e) => eprintln!("Arc creation failed: {e:?}"),
         }
         // Elliptic arcs.
-        for flip in [false, true] {
-            match EllipticArc::from_center_start_end(inputs[14], inputs[15], inputs[16], flip) {
+        for (i, flip) in [(14, false), (17, true)] {
+            match EllipticArc::from_center_start_end(inputs[i], inputs[i + 1], inputs[i + 2], flip)
+            {
                 Ok(earc) => ellipses.push(earc),
                 Err(e) => eprintln!("Elliptic arc creation failed: {e:?}"),
             }
+        }
+        // The source arc is drawn too, so the projection can be compared against it.
+        if let Ok(arc) = Arc::from_three_points(inputs[20], inputs[21], inputs[22]) {
+            let normal = inputs[23] - arc.center();
+            if normal.length() > f32::EPSILON {
+                match EllipticArc::from_projected_arc(&arc, arc.center(), normal) {
+                    Ok(earc) => ellipses.push(earc),
+                    Err(e) => eprintln!("Projected elliptic arc failed: {e:?}"),
+                }
+            }
+            arcs.push(arc);
         }
     }
 }
