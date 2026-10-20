@@ -65,7 +65,11 @@
     what CI runs). In tests, use random-looking numbers for arbitrary values;
     use =PI= and friends only where the exact value matters.
 
-** Adaptive sampling
+** NEXT Adaptive sampling
+   :LOGBOOK:
+   - State "NEXT"       from "TODO"       [2026-10-20 Tue 16:42]
+   - State "TODO"       from              [2026-10-20 Tue 16:42]
+   :END:
 
    Equal steps in the parameter angle =φ=, sized for the worst point on the
    ellipse.
