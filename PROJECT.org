@@ -61,8 +61,10 @@
     (this is what CI runs). In tests, use random-looking numbers for arbitrary values; use =PI= and
     friends only where the exact value matters.
 
-** NEXT Adaptive sampling
+** DONE Adaptive sampling
+   CLOSED: [2026-10-20 Tue 17:21]
    :LOGBOOK:
+   - State "DONE"       from "NEXT"       [2026-10-20 Tue 17:21]
    - State "NEXT"       from "TODO"       [2026-10-20 Tue 16:42]
    - State "TODO"       from              [2026-10-20 Tue 16:42]
    :END:
@@ -113,7 +115,10 @@
    be common, split the sweep into a few pieces, each with its own equal step sized for the worst
    point inside it; that keeps the cheap recurrence.
 
-** Uniform sampling
+** NEXT Uniform sampling
+   :LOGBOOK:
+   - State "NEXT"       from              [2026-10-20 Tue 17:21]
+   :END:
 
    There is no closed form from arc length back to =φ=, and inverting the Carlson length per point
    is far too slow. Follow =Spline::uniform_samples= (in =src/spline.rs=: walk adaptive samples,
