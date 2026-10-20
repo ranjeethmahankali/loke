@@ -20,7 +20,7 @@ impl<const DIM: usize> DVec<DIM> {
         self.0
             .iter()
             .zip(rhs.0.iter())
-            .fold(0.0, |acc, (a, b)| a.mul_add(*b, acc))
+            .fold(0.0, |acc, (a, b)| F64Adaptor::mul_add(*a, *b, acc))
     }
 
     #[inline(always)]
@@ -160,7 +160,7 @@ impl<const DIM: usize> Vec<DIM> {
         self.0
             .iter()
             .zip(rhs.0.iter())
-            .fold(0.0, |acc, (a, b)| a.mul_add(*b, acc))
+            .fold(0.0, |acc, (a, b)| F32Adaptor::mul_add(*a, *b, acc))
     }
 
     #[inline(always)]
@@ -316,9 +316,19 @@ impl ScalarAdaptor for F32Adaptor {
         x.is_finite()
     }
 
+    /// `x * a + b`. With the `fma` target feature this is one fused instruction; without it,
+    /// `mul_add` would be a slow software fallback, so use plain operators instead. Rust never
+    /// fuses plain operators on its own, so the choice has to be made here.
     #[inline(always)]
     fn mul_add(x: Self::Float, a: Self::Float, b: Self::Float) -> Self::Float {
-        x.mul_add(a, b)
+        #[cfg(target_feature = "fma")]
+        {
+            x.mul_add(a, b)
+        }
+        #[cfg(not(target_feature = "fma"))]
+        {
+            x * a + b
+        }
     }
 
     #[inline(always)]
@@ -412,9 +422,19 @@ impl ScalarAdaptor for F64Adaptor {
         x.is_finite()
     }
 
+    /// `x * a + b`. With the `fma` target feature this is one fused instruction; without it,
+    /// `mul_add` would be a slow software fallback, so use plain operators instead. Rust never
+    /// fuses plain operators on its own, so the choice has to be made here.
     #[inline(always)]
     fn mul_add(x: Self::Float, a: Self::Float, b: Self::Float) -> Self::Float {
-        x.mul_add(a, b)
+        #[cfg(target_feature = "fma")]
+        {
+            x.mul_add(a, b)
+        }
+        #[cfg(not(target_feature = "fma"))]
+        {
+            x * a + b
+        }
     }
 
     #[inline(always)]
