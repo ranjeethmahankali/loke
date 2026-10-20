@@ -2,12 +2,12 @@
 #+author: Ranjeeth Mahankali
 #+filetags: :project:loke:
 
-* DONE tn88ea - Change the domains of Arc and LineSegment
-  CLOSED: [2026-10-20 Tue 18:26]
+* NEXT tn88ea - Change the domains of Arc and LineSegment
   :PROPERTIES:
   :CREATED:  2026-06-12 Fri 10:12
   :END:
   :LOGBOOK:
+  - State "NEXT"       from "DONE"       [2026-10-20 Tue 18:28]
   - State "DONE"       from "NEXT"       [2026-10-20 Tue 18:26]
   - State "NEXT"       from "TODO"       [2026-10-20 Tue 18:13]
   :END:
@@ -27,6 +27,33 @@
   just returning the second derivative w.r.t the parameter. Fixing that now.
 
   <2026-10-20 Tue 18:26> Spline curvature is now fixed.
+
+** TODO =mul_add= is slow without FMA
+   :PROPERTIES:
+   :CREATED:  2026-10-20 Tue
+   :END:
+
+   =DVec::dot= (and the f32 =Vec::dot=) in =src/vec.rs= use =mul_add=. Inside this repo,
+   =.cargo/config.toml= sets =target-cpu=native=, so it compiles to an FMA instruction. Crates
+   that depend on loke don't get that flag, so =mul_add= falls back to a slower path. Measured
+   with a harness outside the repo, the elliptic arc uniform-sampling span walk took 13.9 ns per
+   span without the flag, against 6.8 ns with it. Every curve calls =dot=. Options: plain
+   multiply-add (=a * b + c=), or =mul_add= only when the =fma= target feature is enabled.
+
+** NEXT Older benches grow their output buffer
+   :PROPERTIES:
+   :CREATED:  2026-10-20 Tue
+   :END:
+   :LOGBOOK:
+   - State "NEXT"       from "TODO"       [2026-10-20 Tue 18:30]
+   :END:
+
+   In =benches/bench.rs=, =b_arc_adaptive_samples=, =b_elliptic_arc_adaptive_samples= and
+   =b_spline_adaptive_samples= call =buf.clear()= outside =b.iter=, so the buffer keeps growing
+   during each measurement, and the timings include reallocation. Move the =clear= inside
+   =b.iter=, as =b_elliptic_arc_uniform_samples= does.
+
+   <2026-10-20 Tue 18:31> Doing this before the fma change, to get a baseline.
 
 * TODO Implement Polycurves
   :PROPERTIES:
