@@ -82,6 +82,11 @@
 
   Spline projection logic is dimension agnostic. Lines are trivial. Arcs are interesting.
 
+  Splines need to find all roots of the dot product polynomial, and find the closest point from that
+  list. They should also include the end points.
+
+  This is the general idea for all curves. Just happens to be very trivial for lines.
+
   I can write specialized logic for 2d and 3d arcs. I would need to look at the derivative
   expression for the general dimension agnostic arc, and find all points where the dot product with
   the query point and the tangent is zero. I wonder if I can generalize this. If I can, I should
