@@ -35,6 +35,119 @@
   - State "NEXT"       from "TODO"       [2026-10-20 Tue 13:22]
   :END:
 
+  Add =EllipticArc::adaptive_samples(tolerance)= and
+  =EllipticArc::uniform_samples(start, step, tolerance)= in =src/arc.rs=, with
+  the same signatures and meanings as =Arc= and =Spline=: =tolerance= is the
+  maximum distance between the curve and the polyline through the samples;
+  =start= and =step= are arc lengths. These are for tessellation and other hot
+  paths, so per-point cost matters most.
+
+  Context and conventions:
+  - Read the =ELLIPSE ARC MATH= block above =impl EllipticArc= first. The arc is
+    =P(φ) = c + cos φ·U + sin φ·V= for =φ= in =[0, θ]=, with =U = start_vec= and
+    =V = (mid_vec − cos(θ/2)·U) / sin(θ/2)= (§1, §2). The semi-major length is
+    =A = sqrt((a + b + r)/2)= (§3.2).
+  - Add the derivations as a new §8 in that block. In the code, reference it with
+    short comments (=// ELLIPSE ARC MATH §8.2.=). Keep the code terse and inline
+    small computations; don't add helpers for two-line calculations.
+  - Return =impl Iterator<Item = A::Vector>= built with =std::iter::from_fn=, as
+    =Arc= does. No heap allocation.
+  - Emit the first and last points exactly from =start()= and =end()=, never
+    from a recurrence.
+  - Degenerate arcs (=sin(θ/2) < ε=) yield just the two endpoints. If
+    =tolerance <= 0=, fall back to a fixed angle step as =Arc= does (0.1 rad).
+    Clamp =tol/A= to at most 1 so the step is never NaN.
+  - Add benches =elliptic_arc_adaptive_samples= and =elliptic_arc_uniform_samples=
+    in =benches/bench.rs=, next to =arc_adaptive_samples=.
+  - Before finishing: =cargo fmt --all --check=,
+    =cargo clippy --all-targets --all-features -- -D warnings=, =cargo test=,
+    and =RUSTDOCFLAGS='-D warnings' cargo doc --no-deps= must all pass (this is
+    what CI runs). In tests, use random-looking numbers for arbitrary values;
+    use =PI= and friends only where the exact value matters.
+
+** Adaptive sampling
+
+   Equal steps in the parameter angle =φ=, sized for the worst point on the
+   ellipse.
+
+   1. Error of one span. For points at =φ= and =φ + Δ=, the sum-to-product
+      identities give
+      =(P(φ) + P(φ+Δ))/2 − c = cos(Δ/2) · (P(φ + Δ/2) − c)=.
+      So the gap between the chord's midpoint and the curve's midpoint is
+      =(1 − cos(Δ/2))·(P_mid − c)=, whose length is at most =(1 − cos(Δ/2))·A=.
+   2. That gap is the maximum error over the whole span. The ellipse is an
+      affine image of a circle, and affine maps preserve parallelism. On the
+      circle, the point farthest from the chord is the one whose tangent is
+      parallel to the chord, which is the midpoint, so the same holds on the
+      ellipse. The bound is tight near the ends of the major axis.
+   3. Step: =Δ = 2·acos(1 − tol/A)=, then =n = max(1, ceil(θ/Δ))= and use
+      =Δ = θ/n= so the steps are equal. Emit =n + 1= points. For a circle
+      (=A = r=) this is exactly =Arc::adaptive_samples='s step.
+   4. Evaluation without per-point trig. Compute =(cos Δ, sin Δ)= once with
+      =sin_cos=. Advance =(cos φ, sin φ)= by rotating it with that pair (4
+      multiplies, 2 adds), and emit =c + cos φ·U + sin φ·V=.
+   5. Drift. The rotation recurrence accumulates about =k·ε= error after =k=
+      steps, which is visible in f32 (about 1e-4 relative at 1000 points).
+      Re-seed =(cos φ, sin φ)= exactly with =sin_cos(k·Δ)= every 32 steps.
+   6. Tests:
+      - For every pair of consecutive samples, densely sampled curve points
+        between them are within =tolerance= of the chord, over a variety of
+        tilted, thin (A:B up to 100:1), major, semicircle and projected arcs.
+      - The point count is =ceil(θ/Δ) + 1=.
+      - For circular arcs (=EllipticArc::from(&arc)=), the step angle equals
+        =Arc='s and the point count is within one of =Arc::adaptive_samples=
+        (=Arc= splits the sweep into two halves, =2·ceil(θ/2Δ) + 1= points).
+      - First and last points equal =start()= and =end()= exactly.
+      - An =EllipticArc3f= with a tight tolerance (1000+ points) stays within a
+        small multiple of f32 ε of =point(t)= at every sample.
+      - =tolerance <= 0= and =tolerance >= A= behave as described above.
+
+   Known trade-off, not to be done now: equal steps use more points than
+   needed on the flat parts of thin ellipses. A curvature-driven step needs
+   about 82% of the points at A:B = 2:1, 53% at 10:1 and 17% at 100:1, but
+   costs a =sin_cos= and two =sqrt=s per point. If thin ellipses turn out to be
+   common, split the sweep into a few pieces, each with its own equal step
+   sized for the worst point inside it; that keeps the cheap recurrence.
+
+** Uniform sampling
+
+   There is no closed form from arc length back to =φ=, and inverting the
+   Carlson length per point is far too slow. Follow =Spline::uniform_samples=
+   (in =src/spline.rs=: walk adaptive samples, accumulate span lengths,
+   interpolate within spans), specialized for the ellipse.
+
+   1. Walk the adaptive =φ= grid from the section above, using the same
+      =tolerance=, rotation recurrence and re-seeding.
+   2. Length of each span: integrate the speed =|−sin φ·U + cos φ·V|= over the
+      span with 2-point Gauss–Legendre. The two nodes are at fixed offsets from
+      the span start, so their =(cos, sin)= come from rotating by two pairs
+      precomputed once. Cost: 2 =sqrt=s per span. The error shrinks with the
+      fifth power of the span size, which beats =Spline='s
+      chord-plus-sagitta estimate at the same cost.
+   3. Place the outputs. Starting at arc length =start= and stepping by =step=,
+      for each target distance find its span, interpolate =φ= linearly within
+      the span by distance, and evaluate the point with one =sin_cos=.
+      The resulting spacing error is about =tolerance=, matching =Spline=.
+      Optional refinement: one Newton step per point using the speed at the
+      interpolated =φ= (its =sin_cos= is already computed).
+   4. Stop when the target distance passes the end of the arc. Like =Arc= and
+      =Spline=, do not force-emit the end point.
+   5. Tests:
+      - Distances between consecutive samples, measured along the curve, equal
+        =step= to within about =tolerance=. Measure the curve distance with
+        =length()= of the sub-arc between the two parameters (Carlson, exact),
+        building the sub-arc in swept form as the existing tests do with
+        =swept_arc=.
+      - The first sample is at arc length =start= (and at =start()= when
+        =start= is 0); the number of samples is =floor((L − start)/step) + 1=
+        with =L = length()=, allowing for a boundary case at equality.
+      - For circular arcs, the samples match =Arc::uniform_samples= (which is
+        exact) to within =tolerance=.
+      - Thin and major arcs, and =start= larger than the length (no samples).
+
+   Follow-up, separate task: =Arc::adaptive_samples= and =Arc::uniform_samples=
+   call =sin= twice per point; the same rotation recurrence would speed them up.
+
 * TODO Change the domains of Arc and LineSegment
   :PROPERTIES:
   :CREATED:  2026-06-12 Fri 10:12
