@@ -1,4 +1,4 @@
-use crate::{Adaptor, Error, F32Adaptor, F64Adaptor, ScalarAdaptor, polynomial};
+use crate::{Adaptor, Error, F32Adaptor, F64Adaptor, ScalarAdaptor, SerialAdaptor, polynomial};
 use std::{
     cell::RefCell,
     ops::{Index, IndexMut},
@@ -101,6 +101,10 @@ where
 
     pub fn control_points(&self) -> &[A::Vector] {
         &self.control_points
+    }
+
+    pub fn knots(&self) -> &[A::Scalar] {
+        &self.knots
     }
 
     pub fn domain(&self) -> (A::Scalar, A::Scalar) {
@@ -335,6 +339,75 @@ where
         let n_coeff = self.degree() + 1;
         let offset = (n_coeff * n_segs * coord) + (n_coeff * segment);
         &self.power_basis_coeff[offset..(offset + n_coeff)]
+    }
+
+    pub fn serialize(&self, mut w: impl std::io::Write) -> Result<(), std::io::Error>
+    where
+        A: SerialAdaptor<Value = A::Scalar>,
+    {
+        // Write n_knots, then n_control_points as a 64 bit integer each.  Then write n_knots
+        // scalars via the serial adaptor.  Then write DIM x n_control_points scalars (all coords of
+        // one vector one after another in x, y, z, x, y, z, pattern except dimension agnostic).
+        w.write_all(&(self.knots.len() as u64).to_ne_bytes())?;
+        w.write_all(&(self.control_points.len() as u64).to_ne_bytes())?;
+        for &k in &self.knots {
+            A::write(k, &mut w)?;
+        }
+        for &cp in &self.control_points {
+            for coord in A::coord_arr(cp) {
+                A::write(coord, &mut w)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn deserialize(mut src: impl std::io::Read) -> Result<Self, std::io::Error>
+    where
+        A: SerialAdaptor<Value = A::Scalar>,
+    {
+        // Deserialize the same order what was written out by serialize.
+        let read_u64 = |src: &mut dyn std::io::Read| -> Result<u64, std::io::Error> {
+            let mut buf = [0u8; std::mem::size_of::<u64>()];
+            src.read_exact(&mut buf)?;
+            Ok(u64::from_ne_bytes(buf))
+        };
+        let n_knots = read_u64(&mut src)? as usize;
+        let n_control_points = read_u64(&mut src)? as usize;
+        let mut knots = Vec::with_capacity(n_knots);
+        for _ in 0..n_knots {
+            knots.push(A::read(&mut src)?);
+        }
+        let mut control_points = Vec::with_capacity(n_control_points);
+        for _ in 0..n_control_points {
+            let mut coords = [A::scalar(0.0); DIM];
+            for c in coords.iter_mut() {
+                *c = A::read(&mut src)?;
+            }
+            control_points.push(A::vector(coords));
+        }
+        let mut unique_knots = knots.clone();
+        unique_knots.dedup();
+        let power_basis_coeff = compute_polynomial_coeff::<DIM, A>(&knots, &control_points);
+        Ok(Self {
+            knots,
+            control_points,
+            power_basis_coeff,
+            unique_knots,
+        })
+    }
+}
+
+impl<const DIM: usize, A> Default for Spline<DIM, A>
+where
+    A: Adaptor<DIM>,
+{
+    /// A degree-1 spline (a straight line) from the origin to 1 on the first axis.
+    fn default() -> Self {
+        let end = A::vector(std::array::from_fn(|i| {
+            A::scalar(if i == 0 { 1.0 } else { 0.0 })
+        }));
+        Self::create_clamped([A::zero_vector(), end], 1)
+            .expect("a degree-1 spline with 2 control points is always valid")
     }
 }
 
@@ -1039,7 +1112,6 @@ fn calc_ders_basis<A: ScalarAdaptor>(
 
 #[cfg(test)]
 mod test {
-    use std::f64::consts::{E, FRAC_1_PI, LN_2, LOG2_E, PI, SQRT_2, TAU};
 
     use super::*;
     use crate::{DVec, DVec3, polynomial};
@@ -2530,13 +2602,13 @@ mod test {
     #[test]
     fn t_clamped_endpoints_match_control_points() {
         let control_points = [
-            vec3(0.7123, PI, -2.8081),
-            vec3(-SQRT_2, 0.5772, TAU),
-            vec3(E, -LN_2, LOG2_E),
-            vec3(-3.3691, 4.6692, -FRAC_1_PI),
-            vec3(0.1103, -2.5029, 5.7722),
-            vec3(8.3144, 1.6180, -4.1888),
-            vec3(-0.9033, 7.3891, 0.6137),
+            vec3(-3.171, -6.2847, 2.3514),
+            vec3(-7.6961, 0.6459, -2.4176),
+            vec3(-7.956, 0.1338, -8.3251),
+            vec3(-1.1944, -7.7426, -7.3672),
+            vec3(-1.3587, 5.8833, -6.7716),
+            vec3(-4.9817, 2.2938, 8.0588),
+            vec3(1.3879, -1.8598, 8.5726),
         ];
         for degree in 1..=6 {
             let pts = &control_points[..degree + 1];
@@ -2615,7 +2687,7 @@ mod test {
         1.0 / 3.0,
         0.5,
         1.0,
-        std::f64::consts::PI,
+        6.4127,
         7.0,
         100.0,
         1e6,
@@ -2727,10 +2799,7 @@ mod test {
     fn t_curvature_quadratic_constant_second_derivative() {
         // Quadratic Bezier with p0=(0,0,0), p1=(0.5,1,0), p2=(1,0,0).
         // P(t) = (t, 2t-2t², 0), so P''(t) = (0,-4,0) everywhere.
-        let spline = make_clamped(
-            &[vec3(0., 0., 0.), vec3(0.5, 1., 0.), vec3(1., 0., 0.)],
-            2,
-        );
+        let spline = make_clamped(&[vec3(0., 0., 0.), vec3(0.5, 1., 0.), vec3(1., 0., 0.)], 2);
         let expected = vec3(0., -4., 0.);
         let (lo, hi) = spline.domain();
         for i in 0..=4 {
@@ -2748,10 +2817,7 @@ mod test {
     #[test]
     fn t_is_closed() {
         // Open spline: first and last control points differ.
-        let open = make_clamped(
-            &[vec3(0., 0., 0.), vec3(1., 1., 0.), vec3(2., 0., 0.)],
-            2,
-        );
+        let open = make_clamped(&[vec3(0., 0., 0.), vec3(1., 1., 0.), vec3(2., 0., 0.)], 2);
         assert!(!open.is_closed());
 
         // Closed spline: first and last control points are identical.
@@ -2766,5 +2832,97 @@ mod test {
             3,
         );
         assert!(closed.is_closed());
+    }
+
+    #[test]
+    fn t_serialize_deserialize_roundtrip() {
+        let spline = make_clamped(
+            &[
+                vec3(0., 0., 0.),
+                vec3(1., 2., -1.),
+                vec3(2., -3., 4.),
+                vec3(3., 5., -2.),
+                vec3(4., 0., 0.),
+            ],
+            3,
+        );
+        let mut bytes = Vec::new();
+        spline.serialize(&mut bytes).unwrap();
+        let restored = Spline3d::deserialize(&bytes[..]).unwrap();
+        assert_eq!(restored.knots, spline.knots);
+        assert_eq!(restored.control_points, spline.control_points);
+        assert_eq!(restored.unique_knots, spline.unique_knots);
+        assert_eq!(restored.power_basis_coeff, spline.power_basis_coeff);
+        assert_eq!(restored.degree(), spline.degree());
+        assert_eq!(restored.domain(), spline.domain());
+    }
+
+    #[test]
+    fn t_serialize_deserialize_linear() {
+        let spline = make_clamped(&[vec3(0., 0., 0.), vec3(1., 3., 0.), vec3(3., 1., 0.)], 1);
+        let mut bytes = Vec::new();
+        spline.serialize(&mut bytes).unwrap();
+        let restored = Spline3d::deserialize(&bytes[..]).unwrap();
+        assert_eq!(restored.knots, spline.knots);
+        assert_eq!(restored.control_points, spline.control_points);
+        assert_eq!(restored.unique_knots, spline.unique_knots);
+        assert_eq!(restored.power_basis_coeff, spline.power_basis_coeff);
+        assert_eq!(restored.degree(), spline.degree());
+        assert_eq!(restored.domain(), spline.domain());
+    }
+
+    #[test]
+    fn t_serialize_deserialize_2d() {
+        let spline = Spline2d::create_clamped(
+            &[
+                DVec([0., 0.]),
+                DVec([1., 2.]),
+                DVec([2., 0.]),
+                DVec([3., 2.]),
+            ],
+            2,
+        )
+        .unwrap();
+        let mut bytes = Vec::new();
+        spline.serialize(&mut bytes).unwrap();
+        let restored = Spline2d::deserialize(&bytes[..]).unwrap();
+        assert_eq!(restored.knots, spline.knots);
+        assert_eq!(restored.control_points, spline.control_points);
+        assert_eq!(restored.unique_knots, spline.unique_knots);
+        assert_eq!(restored.power_basis_coeff, spline.power_basis_coeff);
+        assert_eq!(restored.degree(), spline.degree());
+        assert_eq!(restored.domain(), spline.domain());
+    }
+
+    #[test]
+    fn t_serialize_deserialize_f32() {
+        let spline = Spline3f::create_clamped(
+            &[
+                crate::Vec([0., 0., 0.]),
+                crate::Vec([1., 2., -1.]),
+                crate::Vec([2., -3., 4.]),
+                crate::Vec([3., 5., -2.]),
+            ],
+            3,
+        )
+        .unwrap();
+        let mut bytes = Vec::new();
+        spline.serialize(&mut bytes).unwrap();
+        let restored = Spline3f::deserialize(&bytes[..]).unwrap();
+        assert_eq!(restored.knots, spline.knots);
+        assert_eq!(restored.control_points, spline.control_points);
+        assert_eq!(restored.unique_knots, spline.unique_knots);
+        assert_eq!(restored.power_basis_coeff, spline.power_basis_coeff);
+        assert_eq!(restored.degree(), spline.degree());
+        assert_eq!(restored.domain(), spline.domain());
+    }
+
+    #[test]
+    fn t_default_is_degree_1_unit_line_on_first_axis() {
+        let spline = Spline3d::default();
+        assert_eq!(spline.degree(), 1);
+        assert_eq!(spline.start(), vec3(0., 0., 0.));
+        assert_eq!(spline.end(), vec3(1., 0., 0.));
+        assert_eq!(spline.domain(), (0.0, 1.0));
     }
 }

@@ -597,7 +597,7 @@ fn handle_trivial_cases<P: ScalarAdaptor>(
 /// Finds all real roots of a polynomial with coefficients in ascending degree order.
 /// Returns the number of roots found. Roots are written to `roots`.
 ///
-/// `coef`: slice of length degree+1, coef[0] + coef[1]*x + ... + coef[N]*x^N
+/// `coef`: slice of length degree+1, `coef[0] + coef[1]*x + ... + coef[N]*x^N`
 /// `roots`: output slice, must have length >= degree
 /// `x_error`: positional error tolerance (use `DEFAULT_ERROR` for the default)
 pub fn polynomial_roots<P: ScalarAdaptor>(

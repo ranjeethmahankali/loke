@@ -65,6 +65,11 @@ impl TrigonometryAdaptor for GlamAdaptor {
     }
 
     #[inline(always)]
+    fn atan2(y: Self::Float, x: Self::Float) -> Self::Float {
+        y.atan2(x)
+    }
+
+    #[inline(always)]
     fn sin_cos(x: Self::Float) -> (Self::Float, Self::Float) {
         x.sin_cos()
     }
@@ -553,8 +558,7 @@ impl<S: Scene> App<S> {
         let mut best_dist = GIZMO_HIT_THRESHOLD;
         let mut best = None;
         for (pi, dp) in self.draggable.iter().enumerate() {
-            for ax in 0..3 {
-                let dir = AXIS_DIRS[ax];
+            for (ax, &dir) in AXIS_DIRS.iter().enumerate() {
                 let a = self.world_to_screen(&vp, w, h, dp.position + dir * inner);
                 let b = self.world_to_screen(&vp, w, h, dp.position + dir * outer);
                 if let (Some(a), Some(b)) = (a, b) {
@@ -1103,21 +1107,22 @@ impl<S: Scene> ApplicationHandler for App<S> {
             }
 
             WindowEvent::Resized(new_size) => {
-                if let Some(gpu) = &mut self.gpu {
-                    if new_size.width > 0 && new_size.height > 0 {
-                        gpu.config.width = new_size.width;
-                        gpu.config.height = new_size.height;
-                        gpu.surface.configure(&gpu.device, &gpu.config);
-                        gpu.depth_view =
-                            create_depth_view(&gpu.device, new_size.width, new_size.height);
-                        gpu.msaa_view = create_msaa_view(
-                            &gpu.device,
-                            new_size.width,
-                            new_size.height,
-                            gpu.config.format,
-                        );
-                        self.request_redraw();
-                    }
+                if let Some(gpu) = &mut self.gpu
+                    && new_size.width > 0
+                    && new_size.height > 0
+                {
+                    gpu.config.width = new_size.width;
+                    gpu.config.height = new_size.height;
+                    gpu.surface.configure(&gpu.device, &gpu.config);
+                    gpu.depth_view =
+                        create_depth_view(&gpu.device, new_size.width, new_size.height);
+                    gpu.msaa_view = create_msaa_view(
+                        &gpu.device,
+                        new_size.width,
+                        new_size.height,
+                        gpu.config.format,
+                    );
+                    self.request_redraw();
                 }
             }
 

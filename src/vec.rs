@@ -1,4 +1,4 @@
-use crate::{Adaptor, ScalarAdaptor, TrigonometryAdaptor};
+use crate::{Adaptor, ScalarAdaptor, SerialAdaptor, TrigonometryAdaptor};
 use std::ops::{
     Add, AddAssign, Div, DivAssign, Index, IndexMut, Mul, MulAssign, Neg, Sub, SubAssign,
 };
@@ -364,6 +364,11 @@ impl TrigonometryAdaptor for F32Adaptor {
     }
 
     #[inline(always)]
+    fn atan2(y: Self::Float, x: Self::Float) -> Self::Float {
+        y.atan2(x)
+    }
+
+    #[inline(always)]
     fn sin_cos(x: Self::Float) -> (Self::Float, Self::Float) {
         x.sin_cos()
     }
@@ -450,6 +455,11 @@ impl TrigonometryAdaptor for F64Adaptor {
     }
 
     #[inline(always)]
+    fn atan2(y: Self::Float, x: Self::Float) -> Self::Float {
+        y.atan2(x)
+    }
+
+    #[inline(always)]
     fn sin_cos(x: Self::Float) -> (Self::Float, Self::Float) {
         x.sin_cos()
     }
@@ -515,6 +525,22 @@ impl<const DIM: usize> Adaptor<DIM> for F64Adaptor {
     }
 }
 
+impl SerialAdaptor for F64Adaptor {
+    type Value = f64;
+
+    #[inline(always)]
+    fn write(val: Self::Value, mut w: impl std::io::Write) -> Result<(), std::io::Error> {
+        w.write_all(&val.to_ne_bytes())
+    }
+
+    #[inline(always)]
+    fn read(mut src: impl std::io::Read) -> Result<Self::Value, std::io::Error> {
+        let mut buf = [0u8; std::mem::size_of::<f64>()];
+        src.read_exact(&mut buf)?;
+        Ok(f64::from_ne_bytes(buf))
+    }
+}
+
 impl<const DIM: usize> Adaptor<DIM> for F32Adaptor {
     type Vector = Vec<DIM>;
     type Scalar = f32;
@@ -557,5 +583,21 @@ impl<const DIM: usize> Adaptor<DIM> for F32Adaptor {
     #[inline(always)]
     fn coord_arr(v: Self::Vector) -> [Self::Scalar; DIM] {
         v.0
+    }
+}
+
+impl SerialAdaptor for F32Adaptor {
+    type Value = f32;
+
+    #[inline(always)]
+    fn write(val: Self::Value, mut w: impl std::io::Write) -> Result<(), std::io::Error> {
+        w.write_all(&val.to_ne_bytes())
+    }
+
+    #[inline(always)]
+    fn read(mut src: impl std::io::Read) -> Result<Self::Value, std::io::Error> {
+        let mut buf = [0u8; std::mem::size_of::<f32>()];
+        src.read_exact(&mut buf)?;
+        Ok(f32::from_ne_bytes(buf))
     }
 }

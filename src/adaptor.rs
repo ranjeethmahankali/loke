@@ -54,6 +54,8 @@ pub trait ScalarAdaptor {
 
 pub trait TrigonometryAdaptor: ScalarAdaptor {
     fn acos(x: Self::Float) -> Self::Float;
+    /// Four-quadrant arctangent of `y / x`, in `(-π, π]`.
+    fn atan2(y: Self::Float, x: Self::Float) -> Self::Float;
     fn sin_cos(x: Self::Float) -> (Self::Float, Self::Float);
     fn sin(x: Self::Float) -> Self::Float;
     fn cos(x: Self::Float) -> Self::Float;
@@ -78,6 +80,14 @@ pub trait Adaptor<const DIM: usize>: Clone + ScalarAdaptor<Float = Self::Scalar>
     fn normalize(v: Self::Vector) -> Self::Vector;
     fn dot_product(a: Self::Vector, b: Self::Vector) -> Self::Scalar;
     fn coord_arr(v: Self::Vector) -> [Self::Scalar; DIM];
+}
+
+/// Functions to serialize/deserialize scalars.
+pub trait SerialAdaptor {
+    type Value;
+
+    fn write(val: Self::Value, w: impl std::io::Write) -> Result<(), std::io::Error>;
+    fn read(src: impl std::io::Read) -> Result<Self::Value, std::io::Error>;
 }
 
 // Helper implementations for types:

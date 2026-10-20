@@ -1,15 +1,19 @@
 use crate::{
-    Adaptor, ScalarAdaptor, TrigonometryAdaptor,
+    Adaptor, ScalarAdaptor, SerialAdaptor, TrigonometryAdaptor,
     error::Error,
     vec::{F32Adaptor, F64Adaptor},
 };
-use core::f64;
-use std::f64::consts::{PI, TAU};
+use std::f64::consts::{FRAC_1_SQRT_2, FRAC_PI_2, PI, TAU};
 
 pub type Arc2d = Arc<2, F64Adaptor>;
 pub type Arc3d = Arc<3, F64Adaptor>;
 pub type Arc2f = Arc<2, F32Adaptor>;
 pub type Arc3f = Arc<3, F32Adaptor>;
+
+pub type EllipticArc2d = EllipticArc<2, F64Adaptor>;
+pub type EllipticArc3d = EllipticArc<3, F64Adaptor>;
+pub type EllipticArc2f = EllipticArc<2, F32Adaptor>;
+pub type EllipticArc3f = EllipticArc<3, F32Adaptor>;
 
 #[derive(Clone, Debug)]
 pub struct Arc<const DIM: usize, A>
@@ -21,7 +25,21 @@ where
     mid_dir: A::Vector,   // Unit vector from center toward midpoint (used for antipodal SLERP).
     end_dir: A::Vector,   // Unit vector from center toward end.
     radius: A::Scalar,
-    angle: A::Scalar, // Signed sweep angle from start to end through mid.
+    angle: A::Scalar, // Sweep angle from start to end through mid.
+}
+
+#[derive(Clone, Debug)]
+pub struct EllipticArc<const DIM: usize, A>
+where
+    A: Adaptor<DIM>,
+{
+    center: A::Vector,
+    start_vec: A::Vector, // Vector from center toward start.
+    mid_vec: A::Vector,   // Vector from center toward midpoint (used for antipodal SLERP).
+    end_vec: A::Vector,   // Vector from center toward end.
+    /// Sweep of the *parameter* angle, not the visible angle between `start_vec` and `end_vec`
+    /// (the two agree only for circles). See ELLIPSE ARC MATH §1 above the `impl`.
+    angle: A::Scalar,
 }
 
 impl<const DIM: usize, A> Arc<DIM, A>
@@ -334,10 +352,647 @@ where
     pub fn reversed(self) -> Self {
         Arc {
             center: self.center,
-            radius: self.radius,
             start_dir: self.end_dir,
             end_dir: self.start_dir,
             mid_dir: self.mid_dir,
+            radius: self.radius,
+            angle: self.angle,
+        }
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.start() == self.end()
+    }
+
+    pub fn serialize(&self, mut w: impl std::io::Write) -> Result<(), std::io::Error>
+    where
+        A: SerialAdaptor<Value = A::Scalar>,
+    {
+        // Write out the scalars of center, start_dir, mid_dir, end_dir, radius, angle, in that order.
+        for v in [self.center, self.start_dir, self.mid_dir, self.end_dir] {
+            for coord in A::coord_arr(v) {
+                A::write(coord, &mut w)?;
+            }
+        }
+        A::write(self.radius, &mut w)?;
+        A::write(self.angle, &mut w)?;
+        Ok(())
+    }
+
+    pub fn deserialize(mut src: impl std::io::Read) -> Result<Self, std::io::Error>
+    where
+        A: SerialAdaptor<Value = A::Scalar>,
+    {
+        // Deserialize the same order what was written out by serialize.
+        let mut vecs = [A::zero_vector(); 4];
+        for v in vecs.iter_mut() {
+            let mut coords = [A::scalar(0.0); DIM];
+            for c in coords.iter_mut() {
+                *c = A::read(&mut src)?;
+            }
+            *v = A::vector(coords);
+        }
+        let [center, start_dir, mid_dir, end_dir] = vecs;
+        let radius = A::read(&mut src)?;
+        let angle = A::read(&mut src)?;
+        Ok(Self {
+            center,
+            start_dir,
+            mid_dir,
+            end_dir,
+            radius,
+            angle,
+        })
+    }
+}
+
+impl<const DIM: usize, A> Default for Arc<DIM, A>
+where
+    A: Adaptor<DIM>,
+{
+    /// A unit-radius quarter arc at the origin, swept from the first axis
+    /// toward the second (all higher axes zero).
+    fn default() -> Self {
+        // An arc needs a 2-plane to sweep in: below that, `end_dir` can't be
+        // a unit vector distinct from `start_dir` (this is also why every
+        // fallible constructor, e.g. `from_three_points`, can only ever
+        // return `Error::PointsCollinear` for `DIM < 2`).
+        const {
+            assert!(DIM >= 2, "Arc<DIM, A>::default() requires DIM >= 2");
+        }
+        Arc {
+            center: A::zero_vector(),
+            start_dir: A::vector(std::array::from_fn(|i| {
+                A::scalar(if i == 0 { 1.0 } else { 0.0 })
+            })),
+            mid_dir: A::vector(std::array::from_fn(|i| {
+                A::scalar(if i < 2 { FRAC_1_SQRT_2 } else { 0.0 })
+            })),
+            end_dir: A::vector(std::array::from_fn(|i| {
+                A::scalar(if i == 1 { 1.0 } else { 0.0 })
+            })),
+            radius: A::scalar(1.0),
+            angle: A::scalar(FRAC_PI_2),
+        }
+    }
+}
+
+/*
+ELLIPSE ARC MATH
+
+Derivations for `EllipticArc`. Code comments refer to the sections below as "§N".
+
+Notation: c = center, S = start_vec, T = mid_vec, θ = angle, h = θ/2.
+"·" is the dot product and |x|² = x·x.
+
+§1 The model
+
+   Every point on the (full) ellipse is
+       P(φ) = c + cos φ · U + sin φ · V,
+   for two vectors U, V and a parameter angle φ. U and V need not be perpendicular, so
+   they are generally NOT the axes of the ellipse.
+
+   The arc is the part with φ in [0, θ]. It starts at φ = 0, passes T at φ = h, and ends
+   at φ = θ, so
+       U = S,    T = cos h · U + sin h · V,    end_vec = cos θ · U + sin θ · V.
+
+   `point` evaluates exactly this curve, using slerp weights on each half of the sweep.
+
+   `angle` is this parameter sweep θ. It is generally NOT the visible angle between S and
+   end_vec; the two agree only for circles. For example, squash a unit circle to half its
+   height and take the arc from 0° to 60°: θ is still 60°, but the visible angle between
+   the squashed start and end is about 40.9°. Many different ellipses share the same
+   center, start and end; θ is what picks one of them. Projecting a circular arc onto a
+   plane is linear, so it keeps θ unchanged (see `from_projected_arc`).
+
+§2 Recovering V
+
+   Subtract cos h · U from both sides of the equation for T in §1 and divide by sin h:
+       V = (T - cos h · S) / sin h.
+   (Using T and not end_vec keeps the divisor sin h, which is only zero for an empty arc.
+   end_vec would need sin θ, which is zero at a semicircle.)
+
+§3 Distance from the center, and the axes
+
+   3.1 Squared distance as a function of φ.
+       Let a = U·U, b = V·V, d = U·V. Expanding P - c = cos φ U + sin φ V:
+           |P - c|² = cos²φ · a + 2 sin φ cos φ · d + sin²φ · b.
+       Use the double-angle identities
+           cos²φ = (1 + cos 2φ)/2,   sin²φ = (1 - cos 2φ)/2,   2 sin φ cos φ = sin 2φ:
+           |P - c|² = (a + b)/2 + ((a - b)/2) · cos 2φ + d · sin 2φ.
+
+   3.2 Collapse the cos/sin pair into one cosine.
+       Let r = sqrt((a - b)² + 4d²). Then ((a - b)/r, 2d/r) is a point on the unit circle,
+       so there is an angle φ0 with
+           cos 2φ0 = (a - b)/r,   sin 2φ0 = 2d/r,   i.e.   φ0 = atan2(2d, a - b) / 2.
+       Substitute (a - b) = r cos 2φ0 and 2d = r sin 2φ0 into 3.1:
+           ((a - b)/2) cos 2φ + d sin 2φ
+               = (r/2) (cos 2φ0 cos 2φ + sin 2φ0 sin 2φ)
+               = (r/2) cos(2φ - 2φ0)          [cos(x - y) = cos x cos y + sin x sin y]
+       so
+           |P - c|² = (a + b)/2 + (r/2) · cos(2(φ - φ0)).
+       A cosine ranges over [-1, 1], hence
+           farthest point:  φ = φ0,        |P - c|² = A² = (a + b + r)/2,
+           nearest point:   φ = φ0 + π/2,  |P - c|² = B² = (a + b - r)/2.
+       The farthest point is the end of the semi-major axis (length A), the nearest the
+       end of the semi-minor axis (length B). Note A² - B² = r, and A² B² = ab - d².
+
+   3.3 The axis frame.
+       Let K = P(φ0) - c (semi-major vector, |K| = A) and L = P(φ0 + π/2) - c (semi-minor
+       vector, |L| = B). With ψ = φ - φ0 and the angle-addition formulas
+           cos(φ0 + ψ) = cos φ0 cos ψ - sin φ0 sin ψ
+           sin(φ0 + ψ) = sin φ0 cos ψ + cos φ0 sin ψ
+       we get
+           P - c = cos(φ0 + ψ) U + sin(φ0 + ψ) V
+                 = cos ψ · (cos φ0 U + sin φ0 V) + sin ψ · (-sin φ0 U + cos φ0 V)
+                 = cos ψ · K + sin ψ · L.
+       K and L are perpendicular: P'(φ) = -sin φ U + cos φ V is exactly P(φ + π/2) - c.
+       |P - c|² has derivative 2 (P - c)·P', which is zero at the extremum φ0, so
+       K · P'(φ0) = K · L = 0.
+
+§4 Foci
+
+   4.1 Distance of the foci from the center.
+       The foci lie on the major axis, on either side of the center, at distance
+           f = sqrt(A² - B²) = sqrt(r)          (A² - B² = r, see 3.2).
+       For a circle a = b and d = 0, so r = 0 and both foci are the center.
+
+   4.2 The major axis direction without any trig.
+       We need the vector W = K = x·U + y·V, where (x, y) = (cos φ0, sin φ0).
+       Note |x·U + y·V|² = x²a + 2xy·d + y²b, the quadratic form of the table
+           G = [ a  d ]
+               [ d  b ]
+       evaluated at (x, y). By 3.2, (x, y) maximizes it among unit (x, y), and the maximum
+       is A². This is the "largest eigenvalue" problem: (x, y) satisfies
+       G·(x, y) = λ·(x, y) with λ = A². We check this directly:
+         * Eigenvalues solve det(G - λI) = 0, i.e. (a - λ)(b - λ) - d² = 0, i.e.
+               λ² - (a + b)λ + (ab - d²) = 0
+               λ = ((a + b) ± sqrt((a + b)² - 4(ab - d²))) / 2
+                 = ((a + b) ± sqrt((a - b)² + 4d²)) / 2 = (a + b ± r)/2,
+           which are exactly A² and B² from 3.2.
+         * For λ = A², the two rows of G·(x, y) = λ·(x, y) read
+               (a - λ)x + d·y = 0   =>   (x, y) ∝ (d, λ - a)
+               d·x + (b - λ)y = 0   =>   (x, y) ∝ (λ - b, d).
+           Both describe the same direction because det(G - λI) = 0.
+       With λ - b = (a - b + r)/2 and λ - a = (b - a + r)/2, one of the two candidates
+       always has a component of at least r/2 (the first if a >= b, the second otherwise),
+       which avoids subtracting two nearly equal numbers. We pick that one. No
+       normalization of (x, y) is needed, see 4.3.
+
+   4.3 Normalizing W without computing its length separately.
+       Because G·(x, y) = λ·(x, y),
+           |W|² = (x, y)·G·(x, y) = λ·(x² + y²).
+       The unit major direction is W / sqrt(λ(x² + y²)), so the focal offset is
+           f · W / |W| = W · sqrt(r) / sqrt(λ(x² + y²)) = W · sqrt(r / (λ(x² + y²))),
+       and the foci are c + offset and c - offset.
+
+§5 Bounding box
+
+   Work one coordinate at a time. Let ui = U[i], vi = V[i]. That coordinate is
+       P_i(φ) = c_i + ui · cos φ + vi · sin φ.
+
+   5.1 Extrema of a coordinate are where its derivative is zero:
+           dP_i/dφ = -ui · sin φ + vi · cos φ = 0   =>   ui · sin φ = vi · cos φ.
+       This says the vector (cos φ, sin φ) is parallel to (ui, vi), so there are two
+       solutions, half a turn apart:
+           (cos φ, sin φ) = +(ui, vi)/n   and   (cos φ, sin φ) = -(ui, vi)/n,
+       where n = sqrt(ui² + vi²).
+
+   5.2 The value of the coordinate at each solution.
+           +: P_i = c_i + ui·(ui/n) + vi·(vi/n) = c_i + (ui² + vi²)/n = c_i + n   (maximum)
+           -: P_i = c_i - n                                                       (minimum)
+       If n = 0 (the arc is flat along this coordinate) there is no extremum to find, and
+       the endpoints already give the right answer.
+
+   5.3 Is a solution inside the arc, i.e. is φ in [0, θ]?
+       We avoid computing φ by looking at signs. For an angle φ:
+           φ is "past the start" when sin φ >= 0 (φ in [0, π]),
+           φ is "before the end" when sin(θ - φ) >= 0.
+       Expand the second one with sin(x - y) = sin x cos y - cos x sin y:
+           sin(θ - φ) = sin θ · cos φ - cos θ · sin φ.
+       For the + solution, sin φ = vi/n and cos φ = ui/n. Dropping the positive factor
+       1/n, which does not change a sign:
+           sign(sin φ)       = sign(vi)
+           sign(sin(θ - φ))  = sign(sin θ · ui - cos θ · vi)
+       The - solution has both signs flipped.
+       If θ <= π, φ is in [0, θ] exactly when BOTH conditions hold: the arc is no longer
+       than half a turn, so being past the start and before the end pins it down.
+       If θ > π, the two conditions each cover a part of the arc and overlap, so EITHER
+       one is enough.
+       Using strict inequalities is fine: an extremum exactly at an endpoint is already
+       counted by the endpoints.
+
+   5.4 Start from the box of the two endpoints, and widen it by each extremum that lies
+       inside the arc. The sqrt in 5.2 is only evaluated when needed.
+
+§6 Length
+
+   6.1 Speed along the curve.
+       Differentiate the axis frame form in 3.3 with respect to ψ (equivalently φ):
+           P' = -sin ψ · K + cos ψ · L.
+       Because K ⟂ L, the squared length has no cross term:
+           |P'|² = sin²ψ |K|² + cos²ψ |L|² = A² sin²ψ + B² cos²ψ.
+
+   6.2 Arc length is the integral of speed.
+       ψ runs from -φ0 (at φ = 0) to θ - φ0 (at φ = θ), so
+           length = ∫ sqrt(A² sin²ψ + B² cos²ψ) dψ   over ψ in [-φ0, θ - φ0].
+
+   6.3 Put it in the standard form of an elliptic integral.
+       Substitute t = ψ + π/2. Then sin ψ = -cos t and cos ψ = sin t, so
+           A² sin²ψ + B² cos²ψ = A² cos²t + B² sin²t.
+       Let q = B²/A² (in [0, 1]) and m = 1 - q. Using cos²t = 1 - sin²t:
+           A² cos²t + B² sin²t = A² (1 - sin²t + q sin²t) = A² (1 - m sin²t).
+       Define E(t) = ∫ from 0 to t of sqrt(1 - m sin²w) dw. Then
+           length = A · (E(t1) - E(t0)),
+           t0 = π/2 - φ0,   t1 = t0 + θ.
+       When the ellipse is a circle, m = 0, E(t) = t, and the length is A · θ.
+
+   6.4 Reduce t to the range where the formulas below are valid.
+       The integrand sqrt(1 - m sin²w) has period π (sin² has period π), and is symmetric
+       about w = π/2 (sin²(π - w) = sin²w). Hence the integral over one full period
+       [0, π] is 2 E_c, where E_c = E(π/2) is the "complete" integral. Write
+           t = n π + y,  n = round(t / π),  y in [-π/2, π/2],
+       then E(t) = 2 n E_c + E(y). Here t is always positive: φ0 is in (-π/2, π/2], so t0
+       is in [0, π), and t1 = t0 + θ < 3π, so n >= 0 and n is small.
+
+   6.5 Evaluate E(y) with Carlson's integrals.
+       Carlson's symmetric integrals R_F and R_D (see `carlson_rf`, `carlson_rd`) satisfy
+       the standard identity (DLMF 19.25.9, not rederived here), for |y| <= π/2 with
+       s = sin y, c = cos y:
+           E(y) = s · R_F(c², Δ, 1) - (m/3) · s³ · R_D(c², Δ, 1),
+           Δ = 1 - m s² = c² + q s²    (the second form has no cancellation).
+       The complete integral is the same formula at y = π/2 (s = 1, c = 0):
+           E_c = R_F(0, q, 1) - (m/3) · R_D(0, q, 1).
+       R_F needs at most one zero argument, so q must be positive. A degenerate ellipse
+       (B = 0, a back-and-forth line) is handled by clamping q to ε², which changes the
+       length by far less than the rounding error.
+
+   6.6 Why no tolerance is needed.
+       Both R_F and R_D repeat a step that shrinks the relative spread of their arguments
+       by a factor of 4. Once the spread is below a fixed threshold, a short Taylor series
+       finishes the job, and its truncation error is below 1e-16 (see `carlson_rf`). The
+       stopping test is the error bound itself.
+
+§7 Curvature
+
+   The curvature vector is d²P/ds² for arc length s. It points toward the center of
+   curvature and its length is the curvature κ = 1/radius of the best-fitting circle.
+   For a circle it is (c - P)/r².
+
+   7.1 Curvature vector for an arbitrary parameter t.
+       Let P' = dP/dt, P'' = d²P/dt², and speed v = |P'|, so ds/dt = v. The unit tangent
+       is T̂ = P'/v. Differentiate it with respect to t, using dv/dt = (P'·P'')/v:
+           dT̂/dt = P''/v - P' (P'·P'')/v³.
+       Convert to arc length with d/ds = (1/v) d/dt:
+           d²P/ds² = dT̂/ds = P''/v² - P' (P'·P'')/v⁴ = (v² P'' - (P'·P'') P') / v⁴.
+       The second term removes the part of P'' along the tangent (speed changing), leaving
+       the part across it (direction changing). No cross product is used, so this holds in
+       any dimension. It is unchanged by rescaling t: P' scales by k and P'' by k², so
+       the numerator and v⁴ both scale by k⁴.
+
+   7.2 P' and P'' for this curve, with the parameter t in [0, 1].
+       The arc is P(t) = c + cos(θt) U + sin(θt) V (§1 with φ = θt). Differentiating twice,
+           P'' = -θ² (cos(θt) U + sin(θt) V) = -θ² (P - c).
+       P' is `tangent(t)`. Both come from the stored vectors; U and V are not needed.
+
+   7.3 Check against the circle.
+       For a circle |P - c| = r, P' ⟂ (P - c), so P'·P'' = 0 and v = θr. Then
+           d²P/ds² = P''/v² = -θ² (P - c) / (θ² r²) = (c - P)/r².
+
+   7.4 When there is no curvature vector.
+       The speed v is zero at a turning point of a degenerate (flat, B = 0) ellipse, where
+       the curvature is infinite. Since |P''| = θ² |P - c|, we compare the speed with
+       |P''|/θ, which is the size of the speed of a circle through the same point:
+           v² θ² <= ε² |P''|²    =>    no result.
+       This also covers θ = 0 (both sides are zero). For a circle v²θ² = |P''|², so it is
+       never triggered; for a genuine ellipse it needs B/A < ε.
+
+   7.5 Higher derivatives with respect to t.
+       From 7.2, P'' = -θ² (P - c). Differentiating again, P''' = -θ² P', and so on: each
+       derivative is -θ² times the one two orders below it, with (P - c) playing the role
+       of the "zeroth" derivative,
+           d_0 = P - c,   d_1 = P',   d_{k+2} = -θ² d_k.
+       The slerp form gives d_0 and d_1, and the rest is repeated scaling.
+*/
+
+impl<const DIM: usize, A: Adaptor<DIM>> EllipticArc<DIM, A> {
+    pub fn from_projected_arc(
+        arc: &Arc<DIM, A>,
+        plane_pt: A::Vector,
+        plane_normal: A::Vector,
+    ) -> Result<Self, Error>
+    where
+        A: TrigonometryAdaptor,
+    {
+        let plane_normal = A::normalize(plane_normal);
+        let center =
+            arc.center - plane_normal * A::dot_product(plane_normal, arc.center - plane_pt);
+        let [start_vec, mid_vec, end_vec] = [
+            arc.start_dir * arc.radius,
+            arc.mid_dir * arc.radius,
+            arc.end_dir * arc.radius,
+        ]
+        .map(|v| v - plane_normal * A::dot_product(plane_normal, v));
+        if [start_vec, mid_vec, end_vec]
+            .iter()
+            .any(|v| A::vector_length(*v) < A::epsilon())
+        {
+            return Err(Error::DegenerateValue);
+        }
+        // Projection is linear, so the sweep is unchanged (ELLIPSE ARC MATH §1).
+        Ok(Self {
+            center,
+            start_vec,
+            mid_vec,
+            end_vec,
+            angle: arc.angle,
+        })
+    }
+
+    pub fn from_center_start_end(
+        center: A::Vector,
+        start: A::Vector,
+        end: A::Vector,
+        flip_dir: bool,
+    ) -> Result<Self, Error>
+    where
+        A: TrigonometryAdaptor,
+    {
+        let start_vec = start - center;
+        if A::vector_length(start - end) < A::epsilon() {
+            return Err(Error::DegenerateValue);
+        }
+        let end_vec = end - center;
+        if A::vector_length(start_vec) < A::epsilon() || A::vector_length(end_vec) < A::epsilon() {
+            return Err(Error::DegenerateValue);
+        }
+        let mut angle = A::acos(A::clamp(
+            A::dot_product(A::normalize(start_vec), A::normalize(end_vec)),
+            A::scalar(-1.0),
+            A::scalar(1.0),
+        ));
+        if angle < A::epsilon() || angle >= (A::scalar(PI) - A::epsilon()) {
+            return Err(Error::DegenerateValue);
+        }
+        let [tstart, tend] = slerp_raw::<A>(angle, A::scalar(0.5));
+        let mut mid_vec = tstart * start_vec + tend * end_vec;
+        if A::vector_length(mid_vec) < A::epsilon() {
+            return Err(Error::DegenerateValue);
+        }
+        // Flip the direction if necessary.
+        if flip_dir {
+            angle = A::scalar(TAU) - angle;
+            mid_vec = -mid_vec;
+        }
+        Ok(Self {
+            center,
+            start_vec,
+            mid_vec,
+            end_vec,
+            angle,
+        })
+    }
+
+    pub fn domain(&self) -> (A::Scalar, A::Scalar) {
+        (A::scalar(0.0), A::scalar(1.0))
+    }
+
+    /// Arc length. There is no elementary closed form for an ellipse; this evaluates the
+    /// incomplete elliptic integral of the second kind with Carlson's algorithm, which
+    /// converges to the full precision of the scalar type with no tolerance parameter.
+    pub fn length(&self) -> A::Scalar
+    where
+        A: TrigonometryAdaptor,
+    {
+        // ELLIPSE ARC MATH §6.
+        let (zero, half, one) = (A::scalar(0.0), A::scalar(0.5), A::scalar(1.0));
+        let (sin_h, cos_h) = A::sin_cos(self.angle * half);
+        if sin_h < A::epsilon() {
+            return A::vector_length(self.end_vec - self.start_vec); // Degenerate: the chord.
+        }
+        let u = self.start_vec;
+        let v = (self.mid_vec - u * cos_h) / sin_h;
+        let (a, b, d) = (
+            A::dot_product(u, u),
+            A::dot_product(v, v),
+            A::dot_product(u, v),
+        );
+        let diff = a - b;
+        let r = A::sqrt(diff * diff + A::scalar(4.0) * d * d);
+        if r <= A::epsilon() * (a + b) {
+            return A::sqrt((a + b) * half) * self.angle; // Circle.
+        }
+        let lambda = (a + b + r) * half; // A²
+        let q = A::clamp(
+            (a * b - d * d) / (lambda * lambda),
+            A::epsilon() * A::epsilon(),
+            one,
+        );
+        let third_m = (one - q) * A::scalar(1.0 / 3.0);
+        let reduce = |t: A::Scalar| {
+            let n = A::to_usize(t * A::scalar(1.0 / PI) + half);
+            (n, t - A::scalar(n as f64 * PI))
+        };
+        let t0 = A::scalar(PI * 0.5) - half * A::atan2(A::scalar(2.0) * d, diff);
+        let (n0, y0) = reduce(t0);
+        let (n1, y1) = reduce(t0 + self.angle);
+        let incomplete = |y: A::Scalar| {
+            let (s, c) = A::sin_cos(y);
+            let c2 = c * c;
+            let delta = c2 + q * s * s;
+            s * carlson_rf::<A>(c2, delta, one)
+                - third_m * s * s * s * carlson_rd::<A>(c2, delta, one)
+        };
+        let mut total = incomplete(y1) - incomplete(y0);
+        if n1 > n0 {
+            let complete = carlson_rf::<A>(zero, q, one) - third_m * carlson_rd::<A>(zero, q, one);
+            total += A::scalar(2.0 * (n1 - n0) as f64) * complete;
+        }
+        A::sqrt(lambda) * total
+    }
+
+    pub fn center(&self) -> A::Vector {
+        self.center
+    }
+
+    /// The two foci of the ellipse this arc lies on. For a circle both foci are the center.
+    pub fn focii(&self) -> (A::Vector, A::Vector)
+    where
+        A: TrigonometryAdaptor,
+    {
+        // ELLIPSE ARC MATH §4.
+        let half = A::scalar(0.5);
+        let (sin_h, cos_h) = A::sin_cos(self.angle * half);
+        if sin_h < A::epsilon() {
+            return (self.center, self.center);
+        }
+        let u = self.start_vec;
+        let v = (self.mid_vec - u * cos_h) / sin_h;
+        let (a, b, d) = (
+            A::dot_product(u, u),
+            A::dot_product(v, v),
+            A::dot_product(u, v),
+        );
+        let diff = a - b;
+        let r = A::sqrt(diff * diff + A::scalar(4.0) * d * d);
+        if r <= A::epsilon() * (a + b) {
+            return (self.center, self.center); // Circle.
+        }
+        let lambda = (a + b + r) * half; // A²
+        let (x, y) = if diff >= A::scalar(0.0) {
+            ((diff + r) * half, d)
+        } else {
+            (d, (r - diff) * half)
+        };
+        let offset = (u * x + v * y) * A::sqrt(r / (lambda * (x * x + y * y)));
+        (self.center + offset, self.center - offset)
+    }
+
+    pub fn angle(&self) -> A::Scalar {
+        self.angle
+    }
+
+    pub fn start(&self) -> A::Vector {
+        self.center + self.start_vec
+    }
+
+    pub fn end(&self) -> A::Vector {
+        self.center + self.end_vec
+    }
+
+    /// Weighted sum of the stored vectors, e.g. with slerp weights.
+    fn blend(&self, w: [A::Scalar; 3]) -> A::Vector {
+        self.start_vec * w[0] + self.mid_vec * w[1] + self.end_vec * w[2]
+    }
+
+    pub fn point(&self, t: A::Scalar) -> Option<A::Vector>
+    where
+        A: TrigonometryAdaptor,
+    {
+        if t < A::scalar(0.0) || t > A::scalar(1.0) {
+            return None;
+        }
+        Some(self.center + self.blend(slerp::<A>(self.angle, t)))
+    }
+
+    pub fn tangent(&self, t: A::Scalar) -> Option<A::Vector>
+    where
+        A: TrigonometryAdaptor,
+    {
+        if t < A::scalar(0.0) || t > A::scalar(1.0) {
+            return None;
+        }
+        Some(self.blend(slerp_deriv::<A>(self.angle, t)))
+    }
+
+    /// Curvature vector `d²P/ds²` (for arc length `s`) at `t` in `[0, 1]`. It points toward the
+    /// center of curvature, and its length is the curvature. Returns `None` outside the domain
+    /// and at points where the curvature is infinite (a degenerate, flat ellipse).
+    pub fn curvature(&self, t: A::Scalar) -> Option<A::Vector>
+    where
+        A: TrigonometryAdaptor,
+    {
+        // ELLIPSE ARC MATH §7.
+        if t < A::scalar(0.0) || t > A::scalar(1.0) {
+            return None;
+        }
+        let [pos, deriv] = slerp_with_deriv::<A>(self.angle, t);
+        let theta_sq = self.angle * self.angle;
+        let d1 = self.blend(deriv);
+        let d2 = self.blend(pos) * -theta_sq;
+        let speed_sq = A::dot_product(d1, d1);
+        if speed_sq * theta_sq <= A::epsilon() * A::epsilon() * A::dot_product(d2, d2) {
+            return None; // §7.4
+        }
+        Some((d2 * speed_sq - d1 * A::dot_product(d1, d2)) / (speed_sq * speed_sq))
+    }
+
+    /// Evaluate the point and its derivatives with respect to the parameter `t` in `[0, 1]`.
+    ///
+    /// `results[0]` is the point, `results[1]` is the first derivative (the same as
+    /// [`Self::tangent`], not normalized), `results[2]` the second derivative, and so on for
+    /// as many entries as the slice has. Note that these are derivatives in `t`, not in arc
+    /// length; use [`Self::curvature`] for the curvature vector.
+    pub fn point_with_derivs(&self, t: A::Scalar, results: &mut [A::Vector]) -> Result<(), Error>
+    where
+        A: TrigonometryAdaptor,
+    {
+        if results.is_empty() {
+            return Ok(());
+        }
+        if t < A::scalar(0.0) || t > A::scalar(1.0) {
+            return Err(Error::InvalidParameter);
+        }
+        if results.len() == 1 {
+            results[0] = self.center + self.blend(slerp::<A>(self.angle, t));
+            return Ok(());
+        }
+        // ELLIPSE ARC MATH §7.5: d_k = -θ² d_{k-2}, with d_0 = P - c.
+        let [pos, deriv] = slerp_with_deriv::<A>(self.angle, t);
+        results[0] = self.blend(pos);
+        results[1] = self.blend(deriv);
+        for k in 2..results.len() {
+            results[k] = results[k - 2] * -(self.angle * self.angle);
+        }
+        results[0] += self.center;
+        Ok(())
+    }
+
+    /// Compute the axis-aligned bounding box of the arc.
+    ///
+    /// Returns `(min_corner, max_corner)`.
+    pub fn bounds(&self) -> (A::Vector, A::Vector)
+    where
+        A: TrigonometryAdaptor,
+    {
+        // ELLIPSE ARC MATH §5.
+        let start = A::coord_arr(self.center + self.start_vec);
+        let end = A::coord_arr(self.center + self.end_vec);
+        let mut min: [A::Scalar; DIM] = std::array::from_fn(|i| A::min(start[i], end[i]));
+        let mut max: [A::Scalar; DIM] = std::array::from_fn(|i| A::max(start[i], end[i]));
+        let (sin_h, cos_h) = A::sin_cos(self.angle * A::scalar(0.5));
+        if sin_h < A::epsilon() {
+            return (A::vector(min), A::vector(max));
+        }
+        let (sin_t, cos_t) = A::sin_cos(self.angle);
+        let short = self.angle <= A::scalar(PI);
+        let zero = A::scalar(0.0);
+        let center = A::coord_arr(self.center);
+        let u = A::coord_arr(self.start_vec);
+        let v = A::coord_arr((self.mid_vec - self.start_vec * cos_h) / sin_h);
+        for i in 0..DIM {
+            let (ui, vi) = (u[i], v[i]);
+            let before_end = sin_t * ui - cos_t * vi; // §5.3; vi is the "past start" sign.
+            let (max_in, min_in) = if short {
+                (
+                    vi > zero && before_end > zero,
+                    vi < zero && before_end < zero,
+                )
+            } else {
+                (
+                    vi > zero || before_end > zero,
+                    vi < zero || before_end < zero,
+                )
+            };
+            if max_in || min_in {
+                let n = A::sqrt(ui * ui + vi * vi);
+                if max_in {
+                    max[i] = A::max(max[i], center[i] + n);
+                }
+                if min_in {
+                    min[i] = A::min(min[i], center[i] - n);
+                }
+            }
+        }
+        (A::vector(min), A::vector(max))
+    }
+
+    pub fn reversed(&self) -> Self {
+        Self {
+            center: self.center,
+            start_vec: self.end_vec,
+            mid_vec: self.mid_vec,
+            end_vec: self.start_vec,
             angle: self.angle,
         }
     }
@@ -347,6 +1002,31 @@ where
     }
 }
 
+impl<const DIM: usize, A: Adaptor<DIM>> From<Arc<DIM, A>> for EllipticArc<DIM, A> {
+    fn from(arc: Arc<DIM, A>) -> Self {
+        Self {
+            center: arc.center,
+            start_vec: arc.start_dir * arc.radius,
+            mid_vec: arc.mid_dir * arc.radius,
+            end_vec: arc.end_dir * arc.radius,
+            angle: arc.angle,
+        }
+    }
+}
+
+impl<const DIM: usize, A: Adaptor<DIM>> From<&Arc<DIM, A>> for EllipticArc<DIM, A> {
+    fn from(arc: &Arc<DIM, A>) -> Self {
+        Self {
+            center: arc.center,
+            start_vec: arc.start_dir * arc.radius,
+            mid_vec: arc.mid_dir * arc.radius,
+            end_vec: arc.end_dir * arc.radius,
+            angle: arc.angle,
+        }
+    }
+}
+
+/// 3d arcs have some special features that don't exist in other dimensions.
 impl<A> Arc<3, A>
 where
     A: Adaptor<3> + TrigonometryAdaptor,
@@ -701,6 +1381,91 @@ fn slerp_with_deriv_unchecked<A: TrigonometryAdaptor>(
         [(sin0 * inv_sin), (sin1 * inv_sin)],
         [(-cos0 * angle * inv_sin), (cos1 * angle * inv_sin)],
     ]
+}
+
+/// Ordinary ellipses need 5-7 Carlson steps, the flattest representable one (q = ε², f64)
+/// needs 10. The cap only matters for non-finite input.
+const CARLSON_MAX_ITER: usize = 16;
+
+/// Carlson's symmetric elliptic integral of the first kind,
+/// R_F(x, y, z) = (1/2) ∫ from 0 to ∞ of dt / sqrt((t + x)(t + y)(t + z)).
+/// Requires x, y, z >= 0 with at most one of them zero.
+///
+/// Duplication theorem: R_F(x, y, z) = R_F(x', y', z') with each argument replaced by
+/// (x + λ)/4, λ = sqrt(x)sqrt(y) + sqrt(y)sqrt(z) + sqrt(z)sqrt(x). This shrinks the relative
+/// spread of the arguments by about 4. Below a spread of 0.0025, the fifth-order Taylor series
+/// has error below 0.0025⁶ / 4 ≈ 6e-17.
+fn carlson_rf<A: ScalarAdaptor>(x: A::Float, y: A::Float, z: A::Float) -> A::Float {
+    const ERRTOL: f64 = 0.0025;
+    let (mut x, mut y, mut z) = (x, y, z);
+    let quarter = A::scalar(0.25);
+    let tol = A::scalar(ERRTOL);
+    let mut iter = 0;
+    loop {
+        let ave = (x + y + z) * A::scalar(1.0 / 3.0);
+        let (dx, dy, dz) = ((ave - x) / ave, (ave - y) / ave, (ave - z) / ave);
+        let spread = A::max(A::abs(dx), A::max(A::abs(dy), A::abs(dz)));
+        if spread < tol || iter >= CARLSON_MAX_ITER {
+            let e2 = dx * dy - dz * dz;
+            let e3 = dx * dy * dz;
+            let series = A::scalar(1.0)
+                + (e2 * A::scalar(1.0 / 24.0) - A::scalar(0.1) - e3 * A::scalar(3.0 / 44.0)) * e2
+                + e3 * A::scalar(1.0 / 14.0);
+            return series / A::sqrt(ave);
+        }
+        let (sx, sy, sz) = (A::sqrt(x), A::sqrt(y), A::sqrt(z));
+        let lambda = sx * (sy + sz) + sy * sz;
+        x = (x + lambda) * quarter;
+        y = (y + lambda) * quarter;
+        z = (z + lambda) * quarter;
+        iter += 1;
+    }
+}
+
+/// Carlson's symmetric elliptic integral of the second kind,
+/// R_D(x, y, z) = (3/2) ∫ from 0 to ∞ of dt / ((t + z) sqrt((t + x)(t + y)(t + z))).
+/// Requires x, y >= 0 with at most one of them zero, and z > 0.
+///
+/// Same duplication as `carlson_rf`, plus a running sum. Series error below 0.0015⁶ ≈ 1e-17.
+fn carlson_rd<A: ScalarAdaptor>(x: A::Float, y: A::Float, z: A::Float) -> A::Float {
+    const ERRTOL: f64 = 0.0015;
+    let (mut x, mut y, mut z) = (x, y, z);
+    let quarter = A::scalar(0.25);
+    let tol = A::scalar(ERRTOL);
+    let mut sum = A::scalar(0.0);
+    let mut fac = A::scalar(1.0);
+    let mut iter = 0;
+    loop {
+        let ave = (x + y + z * A::scalar(3.0)) * A::scalar(0.2);
+        let (dx, dy, dz) = ((ave - x) / ave, (ave - y) / ave, (ave - z) / ave);
+        let spread = A::max(A::abs(dx), A::max(A::abs(dy), A::abs(dz)));
+        if spread < tol || iter >= CARLSON_MAX_ITER {
+            let (c1, c2, c3, c4) = (
+                A::scalar(3.0 / 14.0),
+                A::scalar(1.0 / 6.0),
+                A::scalar(9.0 / 22.0),
+                A::scalar(3.0 / 26.0),
+            );
+            let (c5, c6) = (c3 * quarter, c4 * A::scalar(1.5));
+            let ea = dx * dy;
+            let eb = dz * dz;
+            let ec = ea - eb;
+            let ed = ea - eb * A::scalar(6.0);
+            let ee = ed + ec + ec;
+            let series = A::scalar(1.0)
+                + ed * (-c1 + c5 * ed - c6 * dz * ee)
+                + dz * (c2 * ee + dz * (-c3 * ec + dz * c4 * ea));
+            return sum * A::scalar(3.0) + fac * series / (ave * A::sqrt(ave));
+        }
+        let (sx, sy, sz) = (A::sqrt(x), A::sqrt(y), A::sqrt(z));
+        let lambda = sx * (sy + sz) + sy * sz;
+        sum += fac / (sz * (z + lambda));
+        fac *= quarter;
+        x = (x + lambda) * quarter;
+        y = (y + lambda) * quarter;
+        z = (z + lambda) * quarter;
+        iter += 1;
+    }
 }
 
 #[cfg(test)]
@@ -2355,5 +3120,1173 @@ mod test {
         )
         .unwrap();
         assert!(!quarter.is_closed());
+    }
+
+    // ===================== EllipticArc::from_center_start_end =====================
+
+    #[test]
+    fn t_center_start_end_minor_arc() {
+        // Quarter arc: center at origin, start on +X, end on +Y.
+        let earc = EllipticArc3d::from_center_start_end(
+            DVec([0.0, 0.0, 0.0]),
+            DVec([1.0, 0.0, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+            false,
+        )
+        .unwrap();
+        assert!(
+            (earc.angle - PI / 2.0).abs() < 1e-10,
+            "angle = {}",
+            earc.angle
+        );
+        // start_vec and end_vec should match the input vectors from center.
+        assert!((earc.start_vec - DVec([1.0, 0.0, 0.0])).length() < 1e-10);
+        assert!((earc.end_vec - DVec([0.0, 1.0, 0.0])).length() < 1e-10);
+        // mid_vec should point toward (1,1,0) normalized * radius = (√2/2, √2/2, 0).
+        let mid_dir = earc.mid_vec.normalize();
+        let expected_mid_dir = DVec([FRAC_1_SQRT_2, FRAC_1_SQRT_2, 0.0]);
+        assert!(
+            (mid_dir - expected_mid_dir).length() < 1e-10,
+            "mid_dir = {:?}",
+            mid_dir
+        );
+        // mid_vec magnitude should equal the radius (circular case, equal magnitudes).
+        assert!((earc.mid_vec.length() - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn t_center_start_end_flip_dir() {
+        let center = DVec([0.0, 0.0, 0.0]);
+        let start = DVec([1.0, 0.0, 0.0]);
+        let end = DVec([0.0, 1.0, 0.0]);
+        let minor = EllipticArc3d::from_center_start_end(center, start, end, false).unwrap();
+        let major = EllipticArc3d::from_center_start_end(center, start, end, true).unwrap();
+        // Angles should sum to TAU.
+        assert!(
+            (minor.angle + major.angle - TAU).abs() < 1e-10,
+            "minor={} major={}",
+            minor.angle,
+            major.angle
+        );
+        // mid_vecs should be negations of each other.
+        assert!(
+            (minor.mid_vec + major.mid_vec).length() < 1e-10,
+            "minor.mid={:?} major.mid={:?}",
+            minor.mid_vec,
+            major.mid_vec
+        );
+        // start_vec and end_vec are the same for both.
+        assert!((minor.start_vec - major.start_vec).length() < 1e-10);
+        assert!((minor.end_vec - major.end_vec).length() < 1e-10);
+    }
+
+    #[test]
+    fn t_center_start_end_degenerate() {
+        // Coincident start and end (angle ≈ 0).
+        assert!(
+            EllipticArc3d::from_center_start_end(
+                DVec([0.0, 0.0, 0.0]),
+                DVec([1.0, 0.0, 0.0]),
+                DVec([1.0, 0.0, 0.0]),
+                false,
+            )
+            .is_err()
+        );
+        // Antipodal start and end (angle ≈ π).
+        assert!(
+            EllipticArc3d::from_center_start_end(
+                DVec([0.0, 0.0, 0.0]),
+                DVec([1.0, 0.0, 0.0]),
+                DVec([-1.0, 0.0, 0.0]),
+                false,
+            )
+            .is_err()
+        );
+        // Center coincides with start.
+        assert!(
+            EllipticArc3d::from_center_start_end(
+                DVec([1.0, 0.0, 0.0]),
+                DVec([1.0, 0.0, 0.0]),
+                DVec([0.0, 1.0, 0.0]),
+                false,
+            )
+            .is_err()
+        );
+        // Center coincides with end.
+        assert!(
+            EllipticArc3d::from_center_start_end(
+                DVec([0.0, 1.0, 0.0]),
+                DVec([1.0, 0.0, 0.0]),
+                DVec([0.0, 1.0, 0.0]),
+                false,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn t_center_start_end_matches_arc_from_three_points() {
+        // Build a circular arc via Arc::from_three_points, convert to EllipticArc,
+        // and compare with from_center_start_end using the same center/start/end.
+        let arc = Arc3d::from_three_points(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([FRAC_1_SQRT_2, FRAC_1_SQRT_2, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+        )
+        .unwrap();
+        let from_arc: EllipticArc3d = (&arc).into();
+        let from_cse =
+            EllipticArc3d::from_center_start_end(arc.center(), arc.start(), arc.end(), false)
+                .unwrap();
+        assert!((from_arc.angle - from_cse.angle).abs() < 1e-10);
+        assert!((from_arc.start_vec - from_cse.start_vec).length() < 1e-10);
+        assert!((from_arc.end_vec - from_cse.end_vec).length() < 1e-10);
+        // mid_vec directions should match (magnitudes are equal for circular case).
+        assert!((from_arc.mid_vec.normalize() - from_cse.mid_vec.normalize()).length() < 1e-10);
+    }
+
+    #[test]
+    fn t_center_start_end_3d_off_axis() {
+        // Non-axis-aligned arc in 3D with offset center.
+        let center = DVec([1.0, 2.0, 3.0]);
+        let start = DVec([2.0, 2.0, 3.0]); // +X from center
+        let end = DVec([1.0, 3.0, 3.0]); // +Y from center
+        let earc = EllipticArc3d::from_center_start_end(center, start, end, false).unwrap();
+        assert!((earc.angle - PI / 2.0).abs() < 1e-10);
+        assert!((earc.center - center).length() < 1e-10);
+        assert!((earc.start_vec - DVec([1.0, 0.0, 0.0])).length() < 1e-10);
+        assert!((earc.end_vec - DVec([0.0, 1.0, 0.0])).length() < 1e-10);
+    }
+
+    // ===================== EllipticArc::from_projected_arc =====================
+
+    #[test]
+    fn t_projected_arc_identity() {
+        // Projecting an arc in the XY plane onto the XY plane should give the same arc.
+        let arc = Arc3d::from_three_points(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+            DVec([-1.0, 0.0, 0.0]),
+        )
+        .unwrap();
+        let earc =
+            EllipticArc3d::from_projected_arc(&arc, DVec([0.0, 0.0, 0.0]), DVec([0.0, 0.0, 1.0]))
+                .unwrap();
+        let from_arc: EllipticArc3d = (&arc).into();
+        assert!((earc.angle - from_arc.angle).abs() < 1e-10);
+        assert!((earc.start_vec - from_arc.start_vec).length() < 1e-10);
+        assert!((earc.mid_vec - from_arc.mid_vec).length() < 1e-10);
+        assert!((earc.end_vec - from_arc.end_vec).length() < 1e-10);
+        assert!((earc.center - from_arc.center).length() < 1e-10);
+    }
+
+    #[test]
+    fn t_projected_arc_oblique() {
+        // Arc in XY plane projected onto a tilted plane.
+        // Semicircle r=1 in XY from (1,0,0) through (0,1,0) to (-1,0,0).
+        let arc = Arc3d::from_three_points(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+            DVec([-1.0, 0.0, 0.0]),
+        )
+        .unwrap();
+        // Project onto a plane tilted 45° around X axis (normal = (0, -sin45, cos45)).
+        let normal = DVec([0.0, -FRAC_1_SQRT_2, FRAC_1_SQRT_2]);
+        let earc = EllipticArc3d::from_projected_arc(&arc, DVec([0.0, 0.0, 0.0]), normal).unwrap();
+        // Start and end are on the X axis, so they're unaffected by Y/Z projection.
+        assert!((earc.start_vec - DVec([1.0, 0.0, 0.0])).length() < 1e-10);
+        assert!((earc.end_vec - DVec([-1.0, 0.0, 0.0])).length() < 1e-10);
+        // The projected mid_vec should have reduced Y component.
+        // Original mid_vec = (0, 1, 0). Projection removes component along normal.
+        // proj = (0,1,0) - normal * dot(normal, (0,1,0))
+        //      = (0,1,0) - (0,-√2/2,√2/2) * (-√2/2) = (0,1,0) - (0,0.5,-0.5) = (0,0.5,0.5)
+        let expected_mid = DVec([0.0, 0.5, 0.5]);
+        assert!(
+            (earc.mid_vec - expected_mid).length() < 1e-10,
+            "mid_vec = {:?}, expected {:?}",
+            earc.mid_vec,
+            expected_mid
+        );
+        // Projected angle: start_vec=(1,0,0), end_vec=(-1,0,0) → angle=π (semicircle preserved).
+        assert!((earc.angle - PI).abs() < 1e-10);
+    }
+
+    #[test]
+    fn t_projected_arc_major_arc_preserved() {
+        // A major arc should remain a major arc after projection.
+        // Arc in XY plane going the long way: start=(1,0,0), through (0,-1,0), to (0,1,0).
+        let arc = Arc3d::from_three_points(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([0.0, -1.0, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+        )
+        .unwrap();
+        assert!(arc.angle() > PI, "precondition: arc should be major");
+        // Project onto a plane tilted slightly from XY (normal nearly +Z).
+        // This shrinks Z components but preserves all directions in XY.
+        let earc =
+            EllipticArc3d::from_projected_arc(&arc, DVec([0.0, 0.0, 0.0]), DVec([0.0, 0.0, 1.0]))
+                .unwrap();
+        assert!(
+            earc.angle > PI,
+            "projected major arc should remain major, got angle={}",
+            earc.angle
+        );
+    }
+
+    #[test]
+    fn t_projected_arc_degenerate() {
+        // Arc in XY plane projected along Y axis → all vectors collapse to X axis.
+        let arc = Arc3d::from_three_points(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+            DVec([-1.0, 0.0, 0.0]),
+        )
+        .unwrap();
+        // Project along the arc's plane normal: plane normal = (0,0,1) projected with
+        // projection normal = (0,1,0) means removing Y. mid_dir=(0,1,0) becomes zero.
+        let result =
+            EllipticArc3d::from_projected_arc(&arc, DVec([0.0, 0.0, 0.0]), DVec([0.0, 1.0, 0.0]));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn t_projected_arc_offset_plane() {
+        // Verify projection onto an offset plane shifts the center correctly.
+        let arc = Arc3d::from_three_points(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+            DVec([-1.0, 0.0, 0.0]),
+        )
+        .unwrap();
+        // Project onto Z=5 plane (normal=(0,0,1), point=(0,0,5)).
+        let earc =
+            EllipticArc3d::from_projected_arc(&arc, DVec([0.0, 0.0, 5.0]), DVec([0.0, 0.0, 1.0]))
+                .unwrap();
+        // Arc center is at (0,0,0), projected to Z=5 → center should be (0,0,5).
+        assert!(
+            (earc.center - DVec([0.0, 0.0, 5.0])).length() < 1e-10,
+            "center = {:?}",
+            earc.center
+        );
+        // Vectors from center are projections of direction vectors (Z component removed),
+        // so they should be unchanged since the arc is already in the XY plane.
+        assert!((earc.start_vec - DVec([1.0, 0.0, 0.0])).length() < 1e-10);
+    }
+
+    #[test]
+    fn t_projected_arc_matches_projected_points() {
+        // Every point on the elliptic arc must be the projection of the corresponding
+        // point on the original circular arc. The plane is tilted about an axis that is
+        // not aligned with the arc, so projected angles differ from the original angles.
+        let arc = Arc3d::from_three_points(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([FRAC_1_SQRT_2, FRAC_1_SQRT_2, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+        )
+        .unwrap();
+        let plane_pt = DVec([0.0, 0.0, 0.0]);
+        let normal = DVec([1.0, 1.0, 1.0]).normalize();
+        let earc = EllipticArc3d::from_projected_arc(&arc, plane_pt, normal).unwrap();
+        let project = |p: DVec3| p - normal * normal.dot(p - plane_pt);
+        let len = arc.length();
+        for i in 0..=16 {
+            let t = i as f64 / 16.0;
+            let expected = project(arc.point(t * len).unwrap());
+            let actual = earc.point(t).unwrap();
+            let err = (expected - actual).length();
+            assert!(err < 1e-10, "t={t}: err={err}");
+        }
+    }
+
+    // ===================== EllipticArc::focii =====================
+
+    /// Build an elliptic arc from the swept-loop form `c + cos φ · u + sin φ · v`,
+    /// covering `φ` in `[0, theta]`.
+    fn swept_arc(c: DVec3, u: DVec3, v: DVec3, theta: f64) -> EllipticArc3d {
+        let at = |phi: f64| u * phi.cos() + v * phi.sin();
+        EllipticArc3d {
+            center: c,
+            start_vec: at(0.0),
+            mid_vec: at(theta / 2.0),
+            end_vec: at(theta),
+            angle: theta,
+        }
+    }
+
+    /// Foci are defined by: the sum of distances to them is the same for every point on
+    /// the ellipse, and equals twice the semi-major length.
+    fn assert_focal_sum_constant(earc: &EllipticArc3d, semi_major: f64) {
+        let (f1, f2) = earc.focii();
+        for i in 0..=32 {
+            let p = earc.point(i as f64 / 32.0).unwrap();
+            let sum = (p - f1).length() + (p - f2).length();
+            assert!(
+                (sum - 2.0 * semi_major).abs() < 1e-9,
+                "i={i}: focal sum {sum} != {}",
+                2.0 * semi_major
+            );
+        }
+    }
+
+    #[test]
+    fn t_focii_circle() {
+        let arc = Arc3d::from_three_points(
+            DVec([3.0, 1.0, 0.0]),
+            DVec([1.0, 3.0, 0.0]),
+            DVec([-1.0, 1.0, 0.0]),
+        )
+        .unwrap();
+        let earc: EllipticArc3d = (&arc).into();
+        let (f1, f2) = earc.focii();
+        assert!((f1 - arc.center()).length() < 1e-10);
+        assert!((f2 - arc.center()).length() < 1e-10);
+    }
+
+    #[test]
+    fn t_focii_axis_aligned() {
+        // Semi-axes 5 and 3: foci at (+-4, 0, 0) from the center.
+        let c = DVec([1.0, 2.0, 3.0]);
+        let earc = swept_arc(c, DVec([5.0, 0.0, 0.0]), DVec([0.0, 3.0, 0.0]), 1.0);
+        let (f1, f2) = earc.focii();
+        let (lo, hi) = if f1[0] < f2[0] { (f1, f2) } else { (f2, f1) };
+        assert!((lo - DVec([-3.0, 2.0, 3.0])).length() < 1e-10, "{lo:?}");
+        assert!((hi - DVec([5.0, 2.0, 3.0])).length() < 1e-10, "{hi:?}");
+        // Same ellipse, but the stored start lies on the minor axis instead.
+        let earc = swept_arc(c, DVec([0.0, 3.0, 0.0]), DVec([-5.0, 0.0, 0.0]), 1.0);
+        let (f1, f2) = earc.focii();
+        let (lo, hi) = if f1[0] < f2[0] { (f1, f2) } else { (f2, f1) };
+        assert!((lo - DVec([-3.0, 2.0, 3.0])).length() < 1e-10, "{lo:?}");
+        assert!((hi - DVec([5.0, 2.0, 3.0])).length() < 1e-10, "{hi:?}");
+    }
+
+    #[test]
+    fn t_focii_conjugate_pair() {
+        // u = (1, 0), v = (1, 1): semi-axes are sqrt((3 +- sqrt5)/2) ~ 1.618, 0.618.
+        let semi_major = ((3.0 + 5f64.sqrt()) / 2.0).sqrt();
+        for theta in [0.5, 2.0, PI, 4.0, 5.5] {
+            let earc = swept_arc(
+                DVec([0.5, -1.0, 2.0]),
+                DVec([1.0, 0.0, 0.0]),
+                DVec([1.0, 1.0, 0.0]),
+                theta,
+            );
+            assert_focal_sum_constant(&earc, semi_major);
+        }
+    }
+
+    #[test]
+    fn t_focii_projected_arc() {
+        let arc = Arc3d::from_three_points(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([FRAC_1_SQRT_2, FRAC_1_SQRT_2, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+        )
+        .unwrap();
+        // Projecting a unit circle onto a plane at angle t to its own plane gives semi-axes
+        // 1 and |cos t|. The normal (1,1,1)/sqrt3 gives cos t = 1/sqrt3.
+        let normal = DVec([1.0, 1.0, 1.0]).normalize();
+        let earc = EllipticArc3d::from_projected_arc(&arc, DVec([0.0, 0.0, 0.0]), normal).unwrap();
+        assert_focal_sum_constant(&earc, 1.0);
+        let (f1, f2) = earc.focii();
+        let expected_f = (1.0 - 1.0 / 3.0f64).sqrt();
+        assert!(((f1 - earc.center()).length() - expected_f).abs() < 1e-9);
+        assert!(((f2 - earc.center()).length() - expected_f).abs() < 1e-9);
+    }
+
+    #[test]
+    fn t_focii_reversed() {
+        let semi_major = ((3.0 + 5f64.sqrt()) / 2.0).sqrt();
+        let earc = swept_arc(
+            DVec([0.0, 0.0, 0.0]),
+            DVec([1.0, 0.0, 0.0]),
+            DVec([1.0, 1.0, 0.0]),
+            2.5,
+        );
+        let rev = earc.reversed();
+        assert_focal_sum_constant(&rev, semi_major);
+        let (a1, a2) = earc.focii();
+        let (b1, b2) = rev.focii();
+        let same = (a1 - b1).length() + (a2 - b2).length();
+        let swapped = (a1 - b2).length() + (a2 - b1).length();
+        assert!(same.min(swapped) < 1e-9);
+    }
+
+    // ===================== EllipticArc::bounds =====================
+
+    /// Bounding box of `n + 1` samples along the arc.
+    fn sampled_bounds<const DIM: usize>(
+        earc: &EllipticArc<DIM, F64Adaptor>,
+        n: usize,
+    ) -> ([f64; DIM], [f64; DIM]) {
+        let mut min = [f64::INFINITY; DIM];
+        let mut max = [f64::NEG_INFINITY; DIM];
+        for i in 0..=n {
+            let p = earc.point(i as f64 / n as f64).unwrap();
+            for k in 0..DIM {
+                min[k] = min[k].min(p.0[k]);
+                max[k] = max[k].max(p.0[k]);
+            }
+        }
+        (min, max)
+    }
+
+    /// The exact bounds must contain every sample, and be within sampling error of the
+    /// sampled bounds.
+    fn assert_bounds_match_sampling<const DIM: usize>(
+        earc: &EllipticArc<DIM, F64Adaptor>,
+        label: &str,
+    ) {
+        let (lo, hi) = earc.bounds();
+        let (slo, shi) = sampled_bounds(earc, 20000);
+        for k in 0..DIM {
+            assert!(
+                lo.0[k] <= slo[k] + 1e-12 && slo[k] - lo.0[k] < 1e-6,
+                "{label}: min[{k}] = {}, sampled {}",
+                lo.0[k],
+                slo[k]
+            );
+            assert!(
+                hi.0[k] >= shi[k] - 1e-12 && hi.0[k] - shi[k] < 1e-6,
+                "{label}: max[{k}] = {}, sampled {}",
+                hi.0[k],
+                shi[k]
+            );
+        }
+    }
+
+    #[test]
+    fn t_elliptic_bounds_axis_aligned() {
+        // Full-ish ellipse, semi-axes 5 and 3 around (1, 2, 3).
+        let c = DVec([1.0, 2.0, 3.0]);
+        let earc = swept_arc(c, DVec([5.0, 0.0, 0.0]), DVec([0.0, 3.0, 0.0]), 6.0);
+        let (lo, hi) = earc.bounds();
+        // The sweep (6.0 of 2π) covers nearly the whole ellipse, including both ends of
+        // each axis: the start itself is the +x extreme.
+        assert!((lo[0] + 4.0).abs() < 1e-10, "{lo:?}");
+        assert!((hi[0] - 6.0).abs() < 1e-10, "{hi:?}");
+        assert!((lo[1] + 1.0).abs() < 1e-10, "{lo:?}");
+        assert!((hi[1] - 5.0).abs() < 1e-10, "{hi:?}");
+        assert!((lo[2] - 3.0).abs() < 1e-10 && (hi[2] - 3.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn t_elliptic_bounds_tilted_pairs() {
+        let c = DVec([0.5, -1.0, 2.0]);
+        let u = DVec([1.0, 0.0, 0.0]);
+        let v = DVec([1.0, 1.0, 0.0]);
+        // Includes a semicircle sweep and sweeps of every size.
+        for theta in [0.3, 1.0, 1.5, PI / 2.0, 2.0, PI, 3.5, 4.0, 5.0, 5.5, 6.2] {
+            assert_bounds_match_sampling(&swept_arc(c, u, v, theta), &format!("theta={theta}"));
+        }
+    }
+
+    #[test]
+    fn t_elliptic_bounds_out_of_plane_vectors() {
+        // All three coordinates vary, and the pair is far from perpendicular.
+        let c = DVec([-3.0, 4.0, 1.0]);
+        let u = DVec([2.0, -1.0, 0.5]);
+        let v = DVec([0.3, 1.7, -2.2]);
+        for theta in [0.4, 1.2, PI, 2.8, 4.4, 5.9] {
+            assert_bounds_match_sampling(&swept_arc(c, u, v, theta), &format!("theta={theta}"));
+        }
+    }
+
+    #[test]
+    fn t_elliptic_bounds_every_start_phase() {
+        // Rotating the starting point around the ellipse moves the extrema in and out of
+        // the arc. Sweep through all phases, for short, half, and long arcs.
+        let c = DVec([0.0, 0.0, 0.0]);
+        let u0 = DVec([3.0, 0.0, 0.0]);
+        let v0 = DVec([0.0, 1.0, 0.0]);
+        for theta in [1.0, PI, 4.5] {
+            for k in 0..24 {
+                let phase = TAU * k as f64 / 24.0;
+                let (s, co) = phase.sin_cos();
+                let u = u0 * co + v0 * s;
+                let v = v0 * co - u0 * s;
+                assert_bounds_match_sampling(
+                    &swept_arc(c, u, v, theta),
+                    &format!("theta={theta} phase={phase}"),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn t_elliptic_bounds_projected_arc() {
+        let arc = Arc3d::from_three_points(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([FRAC_1_SQRT_2, FRAC_1_SQRT_2, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+        )
+        .unwrap();
+        let normal = DVec([1.0, 1.0, 1.0]).normalize();
+        let earc = EllipticArc3d::from_projected_arc(&arc, DVec([0.0, 0.0, 1.0]), normal).unwrap();
+        assert_bounds_match_sampling(&earc, "projected minor");
+        let major = Arc3d::from_three_points(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([0.0, -1.0, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+        )
+        .unwrap();
+        let earc =
+            EllipticArc3d::from_projected_arc(&major, DVec([0.0, 0.0, 0.0]), normal).unwrap();
+        assert_bounds_match_sampling(&earc, "projected major");
+    }
+
+    #[test]
+    fn t_elliptic_bounds_matches_circular_arc() {
+        let cases = [
+            // Minor, semicircle, major, and 3D tilted.
+            (
+                [1.0, 0.0, 0.0],
+                [FRAC_1_SQRT_2, FRAC_1_SQRT_2, 0.0],
+                [0.0, 1.0, 0.0],
+            ),
+            ([-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]),
+            ([1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 1.0, 0.0]),
+            ([3.0, 1.0, 2.0], [0.0, 2.0, 1.0], [-2.0, 1.0, 4.0]),
+            ([10.0, 5.0, 0.0], [7.0, 8.0, 0.0], [4.0, 5.0, 0.0]),
+        ];
+        for (i, (a, b, c)) in cases.into_iter().enumerate() {
+            let arc = Arc3d::from_three_points(DVec(a), DVec(b), DVec(c)).unwrap();
+            let earc: EllipticArc3d = (&arc).into();
+            let (alo, ahi) = arc.bounds();
+            let (elo, ehi) = earc.bounds();
+            assert!((alo - elo).length() < 1e-9, "case {i}: {alo:?} vs {elo:?}");
+            assert!((ahi - ehi).length() < 1e-9, "case {i}: {ahi:?} vs {ehi:?}");
+        }
+    }
+
+    #[test]
+    fn t_elliptic_bounds_2d() {
+        let at = |phi: f64| DVec([2.0 * phi.cos() + phi.sin(), 0.5 * phi.sin()]);
+        let theta = 4.0;
+        let earc = EllipticArc2d {
+            center: DVec([1.0, 1.0]),
+            start_vec: at(0.0),
+            mid_vec: at(theta / 2.0),
+            end_vec: at(theta),
+            angle: theta,
+        };
+        assert_bounds_match_sampling(&earc, "2d");
+    }
+
+    #[test]
+    fn t_elliptic_bounds_reversed() {
+        let earc = swept_arc(
+            DVec([0.0, 0.0, 0.0]),
+            DVec([1.0, 0.0, 0.0]),
+            DVec([1.0, 1.0, 0.0]),
+            2.5,
+        );
+        let (lo, hi) = earc.bounds();
+        let (rlo, rhi) = earc.reversed().bounds();
+        assert!((lo - rlo).length() < 1e-9 && (hi - rhi).length() < 1e-9);
+    }
+
+    // ===================== EllipticArc::length =====================
+
+    /// Reference length: Simpson's rule on |dP/dt| over t in [0, 1] with `n` (even) steps.
+    fn simpson_length(earc: &EllipticArc3d, n: usize) -> f64 {
+        let speed = |i: usize| earc.tangent(i as f64 / n as f64).unwrap().length();
+        let mut sum = speed(0) + speed(n);
+        for i in 1..n {
+            sum += speed(i) * if i % 2 == 1 { 4.0 } else { 2.0 };
+        }
+        sum / (3.0 * n as f64)
+    }
+
+    fn assert_length_matches_integration(earc: &EllipticArc3d, n: usize, tol: f64, label: &str) {
+        let expected = simpson_length(earc, n);
+        let actual = earc.length();
+        assert!(
+            (actual - expected).abs() <= tol * expected,
+            "{label}: length {actual} != {expected} (rel err {})",
+            (actual - expected).abs() / expected
+        );
+    }
+
+    #[test]
+    fn t_elliptic_length_circle() {
+        let c = DVec([1.0, 2.0, 3.0]);
+        for theta in [0.1, 1.0, PI, 4.0, 6.0] {
+            let earc = swept_arc(c, DVec([2.0, 0.0, 0.0]), DVec([0.0, 2.0, 0.0]), theta);
+            assert!(
+                (earc.length() - 2.0 * theta).abs() < 1e-12,
+                "theta={theta}: {}",
+                earc.length()
+            );
+        }
+        // From a circular Arc, including a major arc.
+        let arc = Arc3d::from_three_points(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([0.0, -1.0, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+        )
+        .unwrap();
+        let earc: EllipticArc3d = (&arc).into();
+        assert!((earc.length() - arc.length()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn t_elliptic_length_tilted_pairs() {
+        let c = DVec([0.5, -1.0, 2.0]);
+        let u = DVec([1.0, 0.0, 0.0]);
+        let v = DVec([1.0, 1.0, 0.0]);
+        for theta in [0.01, 0.3, 1.0, PI / 2.0, 2.0, PI, 3.5, 4.0, 5.0, 5.5, 6.2] {
+            assert_length_matches_integration(
+                &swept_arc(c, u, v, theta),
+                200_000,
+                1e-11,
+                &format!("theta={theta}"),
+            );
+        }
+    }
+
+    #[test]
+    fn t_elliptic_length_out_of_plane_vectors() {
+        let c = DVec([-3.0, 4.0, 1.0]);
+        let u = DVec([2.0, -1.0, 0.5]);
+        let v = DVec([0.3, 1.7, -2.2]);
+        for theta in [0.4, 1.2, PI, 2.8, 4.4, 5.9] {
+            assert_length_matches_integration(
+                &swept_arc(c, u, v, theta),
+                200_000,
+                1e-11,
+                &format!("theta={theta}"),
+            );
+        }
+    }
+
+    #[test]
+    fn t_elliptic_length_every_start_phase() {
+        // Rotating the start around the ellipse moves the arc across the axes, which
+        // exercises every branch of the range reduction.
+        let c = DVec([0.0, 0.0, 0.0]);
+        let u0 = DVec([3.0, 0.0, 0.0]);
+        let v0 = DVec([0.0, 1.0, 0.0]);
+        for theta in [1.0, PI, 4.5, 6.0] {
+            for k in 0..24 {
+                let phase = TAU * k as f64 / 24.0;
+                let (s, co) = phase.sin_cos();
+                let u = u0 * co + v0 * s;
+                let v = v0 * co - u0 * s;
+                assert_length_matches_integration(
+                    &swept_arc(c, u, v, theta),
+                    50_000,
+                    1e-11,
+                    &format!("theta={theta} phase={phase}"),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn t_elliptic_length_projected_arc() {
+        let normal = DVec([1.0, 1.0, 1.0]).normalize();
+        let minor = Arc3d::from_three_points(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([FRAC_1_SQRT_2, FRAC_1_SQRT_2, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+        )
+        .unwrap();
+        let major = Arc3d::from_three_points(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([0.0, -1.0, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+        )
+        .unwrap();
+        for (arc, label) in [(minor, "minor"), (major, "major")] {
+            let earc =
+                EllipticArc3d::from_projected_arc(&arc, DVec([0.0, 0.0, 1.0]), normal).unwrap();
+            assert_length_matches_integration(&earc, 200_000, 1e-11, label);
+        }
+    }
+
+    #[test]
+    fn t_elliptic_length_thin_ellipses() {
+        // Semi-axes 1 and ratio 1e-2, 1e-4, 1e-6: the speed has a sharp dip that the
+        // reference integration only resolves for the milder ratios.
+        for (ratio, n, tol) in [(1e-2, 200_000, 1e-10), (1e-4, 2_000_000, 1e-7)] {
+            for theta in [1.0, 4.0] {
+                let earc = swept_arc(
+                    DVec([0.0, 0.0, 0.0]),
+                    DVec([1.0, 0.0, 0.0]),
+                    DVec([0.0, ratio, 0.0]),
+                    theta,
+                );
+                assert_length_matches_integration(&earc, n, tol, &format!("ratio={ratio}"));
+            }
+        }
+        // Extremely thin: bounded by the line length 4A, and by the semi-major sweep.
+        let earc = swept_arc(
+            DVec([0.0, 0.0, 0.0]),
+            DVec([1.0, 0.0, 0.0]),
+            DVec([0.0, 1e-9, 0.0]),
+            3.0,
+        );
+        let expected = 1.0 - 3f64.cos(); // ∫ |sin φ| dφ over [0, 3]
+        assert!((earc.length() - expected).abs() < 1e-8, "{}", earc.length());
+    }
+
+    #[test]
+    fn t_elliptic_length_degenerate_line() {
+        // V = 0: the "ellipse" is a segment of length 5 traversed back and forth.
+        // P = (5 cos φ, 0, 0), speed 5|sin φ|, so length = 5 (1 - cos 3) for φ in [0, 3].
+        let earc = swept_arc(
+            DVec([0.0, 0.0, 0.0]),
+            DVec([5.0, 0.0, 0.0]),
+            DVec([0.0, 0.0, 0.0]),
+            3.0,
+        );
+        let expected = 5.0 * (1.0 - 3f64.cos());
+        assert!(
+            (earc.length() - expected).abs() < 1e-9,
+            "{} != {expected}",
+            earc.length()
+        );
+    }
+
+    #[test]
+    fn t_elliptic_length_additive() {
+        // Splitting the sweep at its middle: the two halves add up to the whole.
+        let c = DVec([0.0, 1.0, 0.0]);
+        let u = DVec([2.0, 0.5, 0.0]);
+        let v = DVec([-0.3, 1.1, 0.7]);
+        for theta in [1.0f64, 3.0, 5.0] {
+            let h = theta / 2.0;
+            let (s, co) = h.sin_cos();
+            let first = swept_arc(c, u, v, h);
+            let second = swept_arc(c, u * co + v * s, v * co - u * s, h);
+            let sum = first.length() + second.length();
+            let whole = swept_arc(c, u, v, theta).length();
+            assert!(
+                (sum - whole).abs() < 1e-12 * whole,
+                "theta={theta}: {sum} vs {whole}"
+            );
+        }
+    }
+
+    #[test]
+    fn t_elliptic_length_f32() {
+        // Same arc in single precision: the Carlson loops must terminate and agree with f64.
+        let at = |phi: f64| DVec([phi.cos() + phi.sin(), 0.4 * phi.sin(), 0.0]);
+        let theta = 4.0;
+        let wide = swept_arc(
+            DVec([0.0, 0.0, 0.0]),
+            DVec([1.0, 0.0, 0.0]),
+            DVec([1.0, 0.4, 0.0]),
+            theta,
+        );
+        let narrow = |v: DVec3| crate::Vec::<3>([v.0[0] as f32, v.0[1] as f32, v.0[2] as f32]);
+        let earc = EllipticArc3f {
+            center: narrow(DVec([0.0, 0.0, 0.0])),
+            start_vec: narrow(at(0.0)),
+            mid_vec: narrow(at(theta / 2.0)),
+            end_vec: narrow(at(theta)),
+            angle: theta as f32,
+        };
+        let expected = wide.length();
+        let actual = earc.length() as f64;
+        assert!(
+            (actual - expected).abs() < 1e-4 * expected,
+            "f32 length {actual} vs f64 {expected}"
+        );
+    }
+
+    // ===================== EllipticArc::curvature =====================
+
+    #[test]
+    fn t_elliptic_curvature_matches_circular_arc() {
+        let cases = [
+            (
+                [1.0, 0.0, 0.0],
+                [FRAC_1_SQRT_2, FRAC_1_SQRT_2, 0.0],
+                [0.0, 1.0, 0.0],
+            ),
+            ([-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]),
+            ([1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 1.0, 0.0]),
+            ([3.0, 1.0, 2.0], [0.0, 2.0, 1.0], [-2.0, 1.0, 4.0]),
+        ];
+        for (i, (a, b, c)) in cases.into_iter().enumerate() {
+            let arc = Arc3d::from_three_points(DVec(a), DVec(b), DVec(c)).unwrap();
+            let earc: EllipticArc3d = (&arc).into();
+            for k in 0..=10 {
+                let t = k as f64 / 10.0;
+                let expected = arc.curvature(t * arc.length()).unwrap();
+                let actual = earc.curvature(t).unwrap();
+                assert!(
+                    (expected - actual).length() < 1e-10,
+                    "case {i}, t={t}: {actual:?} vs {expected:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn t_elliptic_curvature_axis_aligned() {
+        // x = 5 cos φ, y = 3 sin φ. The curvature is 5/9 at (5, 0) and 3/25 at (0, 3),
+        // pointing at the center. Sweep π puts φ = 0 at t = 0 and φ = π/2 at t = 0.5.
+        let earc = swept_arc(
+            DVec([1.0, 2.0, 3.0]),
+            DVec([5.0, 0.0, 0.0]),
+            DVec([0.0, 3.0, 0.0]),
+            PI,
+        );
+        let k0 = earc.curvature(0.0).unwrap();
+        assert!(
+            (k0 - DVec([-5.0 / 9.0, 0.0, 0.0])).length() < 1e-12,
+            "{k0:?}"
+        );
+        let k1 = earc.curvature(0.5).unwrap();
+        assert!(
+            (k1 - DVec([0.0, -3.0 / 25.0, 0.0])).length() < 1e-12,
+            "{k1:?}"
+        );
+        // General point: kappa = a b / (a² sin²φ + b² cos²φ)^(3/2).
+        for i in 0..=10 {
+            let t = i as f64 / 10.0;
+            let phi = PI * t;
+            let (a, b) = (5.0f64, 3.0f64);
+            let kappa = a * b / (a * a * phi.sin().powi(2) + b * b * phi.cos().powi(2)).powf(1.5);
+            let k = earc.curvature(t).unwrap();
+            assert!(
+                (k.length() - kappa).abs() < 1e-12,
+                "t={t}: {} vs {kappa}",
+                k.length()
+            );
+        }
+    }
+
+    #[test]
+    fn t_elliptic_curvature_geometry() {
+        // The curvature vector is perpendicular to the tangent and points toward the
+        // inside of the curve, for arcs that are neither axis-aligned nor in a plane
+        // through the origin.
+        let c = DVec([-3.0, 4.0, 1.0]);
+        let u = DVec([2.0, -1.0, 0.5]);
+        let v = DVec([0.3, 1.7, -2.2]);
+        for theta in [0.6, PI, 4.4, 6.0] {
+            let earc = swept_arc(c, u, v, theta);
+            for i in 0..=20 {
+                let t = i as f64 / 20.0;
+                let k = earc.curvature(t).unwrap();
+                let tan = earc.tangent(t).unwrap();
+                assert!(k.dot(tan).abs() < 1e-9 * k.length() * tan.length());
+                let inward = earc.center() - earc.point(t).unwrap();
+                assert!(k.dot(inward) > 0.0, "theta={theta}, t={t}: points outward");
+            }
+        }
+    }
+
+    #[test]
+    fn t_elliptic_curvature_finite_difference() {
+        // d²P/ds² = d(unit tangent)/ds, estimated with central differences.
+        let c = DVec([0.5, -1.0, 2.0]);
+        let u = DVec([1.0, 0.0, 0.0]);
+        let v = DVec([1.0, 1.0, 0.5]);
+        let h = 1e-5;
+        for theta in [1.0, PI, 5.0] {
+            let earc = swept_arc(c, u, v, theta);
+            for i in 1..10 {
+                let t = i as f64 / 10.0;
+                let unit = |t: f64| earc.tangent(t).unwrap().normalize();
+                let speed = earc.tangent(t).unwrap().length();
+                let numeric = (unit(t + h) - unit(t - h)) / (2.0 * h * speed);
+                let actual = earc.curvature(t).unwrap();
+                assert!(
+                    (numeric - actual).length() < 1e-6 * actual.length(),
+                    "theta={theta}, t={t}: {actual:?} vs {numeric:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn t_elliptic_curvature_domain_and_degenerate() {
+        let earc = swept_arc(
+            DVec([0.0, 0.0, 0.0]),
+            DVec([2.0, 0.0, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+            2.0,
+        );
+        assert!(earc.curvature(-0.001).is_none());
+        assert!(earc.curvature(1.001).is_none());
+        // A flat ellipse (V = 0): the point at t = 0 is a turning point, with infinite curvature.
+        let flat = swept_arc(
+            DVec([0.0, 0.0, 0.0]),
+            DVec([5.0, 0.0, 0.0]),
+            DVec([0.0, 0.0, 0.0]),
+            2.0,
+        );
+        assert!(flat.curvature(0.0).is_none());
+        // A very thin but genuine ellipse still has a finite, large curvature there: a/b².
+        let thin = swept_arc(
+            DVec([0.0, 0.0, 0.0]),
+            DVec([1.0, 0.0, 0.0]),
+            DVec([0.0, 1e-4, 0.0]),
+            2.0,
+        );
+        let k = thin.curvature(0.0).unwrap().length();
+        assert!((k - 1e8).abs() < 1e-4 * 1e8, "{k}");
+    }
+
+    #[test]
+    fn t_elliptic_curvature_reversed() {
+        // Reversing the direction does not change the curvature vector at a given point.
+        let earc = swept_arc(
+            DVec([0.0, 0.0, 0.0]),
+            DVec([1.0, 0.0, 0.0]),
+            DVec([1.0, 1.0, 0.0]),
+            2.5,
+        );
+        let rev = earc.reversed();
+        for i in 0..=10 {
+            let t = i as f64 / 10.0;
+            let a = earc.curvature(t).unwrap();
+            let b = rev.curvature(1.0 - t).unwrap();
+            assert!((a - b).length() < 1e-9, "t={t}: {a:?} vs {b:?}");
+        }
+    }
+
+    // ===================== EllipticArc::point_with_derivs =====================
+
+    #[test]
+    fn t_elliptic_point_with_derivs_matches_point_and_tangent() {
+        let earc = swept_arc(
+            DVec([0.5, -1.0, 2.0]),
+            DVec([1.0, 0.0, 0.0]),
+            DVec([1.0, 1.0, 0.5]),
+            4.0,
+        );
+        let mut results = [DVec([0.0; 3]); 3];
+        for i in 0..=20 {
+            let t = i as f64 / 20.0;
+            earc.point_with_derivs(t, &mut results).unwrap();
+            assert!(
+                (results[0] - earc.point(t).unwrap()).length() < 1e-12,
+                "t={t}"
+            );
+            assert!(
+                (results[1] - earc.tangent(t).unwrap()).length() < 1e-12,
+                "t={t}"
+            );
+            // Second derivative: -θ² (P - c).
+            let expected = (earc.point(t).unwrap() - earc.center()) * -(4.0 * 4.0);
+            assert!((results[2] - expected).length() < 1e-10, "t={t}");
+        }
+        // A single entry gives only the point, and the endpoints are exact.
+        let mut one = [DVec([0.0; 3])];
+        earc.point_with_derivs(0.0, &mut one).unwrap();
+        assert!((one[0] - earc.start()).length() < 1e-12);
+        earc.point_with_derivs(1.0, &mut one).unwrap();
+        assert!((one[0] - earc.end()).length() < 1e-12);
+    }
+
+    #[test]
+    fn t_elliptic_point_with_derivs_finite_difference() {
+        // Each derivative is the derivative of the one below it, checked with central
+        // differences, up to the sixth, on both sides of the slerp's midpoint switch.
+        let earc = swept_arc(
+            DVec([-3.0, 4.0, 1.0]),
+            DVec([2.0, -1.0, 0.5]),
+            DVec([0.3, 1.7, -2.2]),
+            2.5,
+        );
+        let h = 1e-4;
+        let eval = |t: f64| {
+            let mut r = [DVec([0.0; 3]); 6];
+            earc.point_with_derivs(t, &mut r).unwrap();
+            r
+        };
+        for t in [0.1, 0.3, 0.45, 0.55, 0.7, 0.9] {
+            let (lo, hi, mid) = (eval(t - h), eval(t + h), eval(t));
+            for k in 1..6 {
+                let numeric = (hi[k - 1] - lo[k - 1]) / (2.0 * h);
+                let scale = mid[k].length().max(1.0);
+                assert!(
+                    (numeric - mid[k]).length() < 1e-6 * scale,
+                    "t={t}, k={k}: {:?} vs {:?}",
+                    mid[k],
+                    numeric
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn t_elliptic_point_with_derivs_domain() {
+        let earc = swept_arc(
+            DVec([0.0; 3]),
+            DVec([1.0, 0.0, 0.0]),
+            DVec([0.0, 2.0, 0.0]),
+            1.5,
+        );
+        let mut two = [DVec([0.0; 3]); 2];
+        let mut one = [DVec([0.0; 3])];
+        assert!(earc.point_with_derivs(-0.01, &mut two).is_err());
+        assert!(earc.point_with_derivs(1.01, &mut two).is_err());
+        assert!(earc.point_with_derivs(-0.01, &mut one).is_err());
+        // An empty slice is a no-op, even out of domain, as for `Arc`.
+        assert!(earc.point_with_derivs(-0.01, &mut []).is_ok());
+    }
+
+    #[test]
+    fn t_elliptic_point_with_derivs_2d() {
+        let at = |phi: f64| DVec([2.0 * phi.cos() + phi.sin(), 0.5 * phi.sin()]);
+        let theta = 3.0;
+        let earc = EllipticArc2d {
+            center: DVec([1.0, 1.0]),
+            start_vec: at(0.0),
+            mid_vec: at(theta / 2.0),
+            end_vec: at(theta),
+            angle: theta,
+        };
+        let mut r = [DVec([0.0; 2]); 4];
+        earc.point_with_derivs(0.3, &mut r).unwrap();
+        assert!((r[0] - earc.point(0.3).unwrap()).length() < 1e-12);
+        assert!((r[1] - earc.tangent(0.3).unwrap()).length() < 1e-12);
+        // d_3 = -θ² d_1.
+        assert!((r[3] - r[1] * -(theta * theta)).length() < 1e-10);
+    }
+
+    // ===================== EllipticArc::point and tangent =====================
+
+    #[test]
+    fn t_elliptic_arc_point() {
+        // Unit quarter circle: center=origin, start=(1,0,0), end=(0,1,0).
+        let earc = EllipticArc3d::from_center_start_end(
+            DVec([0.0, 0.0, 0.0]),
+            DVec([1.0, 0.0, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+            false,
+        )
+        .unwrap();
+        // Endpoints.
+        assert!((earc.point(0.0).unwrap() - DVec([1.0, 0.0, 0.0])).length() < 1e-10);
+        assert!((earc.point(1.0).unwrap() - DVec([0.0, 1.0, 0.0])).length() < 1e-10);
+        // Midpoint of a unit quarter circle lies on (√2/2, √2/2, 0).
+        let pm = earc.point(0.5).unwrap();
+        assert!(
+            (pm - DVec([FRAC_1_SQRT_2, FRAC_1_SQRT_2, 0.0])).length() < 1e-10,
+            "pm={pm:?}"
+        );
+        // Out of domain.
+        assert!(earc.point(-0.001).is_none());
+        assert!(earc.point(1.001).is_none());
+    }
+
+    #[test]
+    fn t_elliptic_arc_tangent() {
+        // Circular arc (radius 3, center offset): tangent must be perpendicular to radius
+        // at every sampled point, and out-of-domain must return None.
+        let earc = EllipticArc3d::from_center_start_end(
+            DVec([1.0, 2.0, 0.0]),
+            DVec([4.0, 2.0, 0.0]), // start = center + (3,0,0)
+            DVec([1.0, 5.0, 0.0]), // end   = center + (0,3,0)
+            false,
+        )
+        .unwrap();
+        for i in 0..=8 {
+            let t = i as f64 / 8.0;
+            let p = earc.point(t).unwrap();
+            let tan = earc.tangent(t).unwrap();
+            let dot = (p - earc.center()).dot(tan).abs();
+            assert!(dot < 1e-10, "t={t}: dot={dot}");
+        }
+        assert!(earc.tangent(-0.001).is_none());
+        assert!(earc.tangent(1.001).is_none());
+    }
+
+    #[test]
+    fn t_serialize_deserialize_roundtrip() {
+        let arc = Arc3d::from_three_points(
+            DVec([-1.0, 0.0, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+            DVec([1.0, 0.0, 0.0]),
+        )
+        .unwrap();
+        let mut bytes = Vec::new();
+        arc.serialize(&mut bytes).unwrap();
+        let restored = Arc3d::deserialize(&bytes[..]).unwrap();
+        assert_eq!(restored.center, arc.center);
+        assert_eq!(restored.start_dir, arc.start_dir);
+        assert_eq!(restored.mid_dir, arc.mid_dir);
+        assert_eq!(restored.end_dir, arc.end_dir);
+        assert_eq!(restored.radius, arc.radius);
+        assert_eq!(restored.angle, arc.angle);
+    }
+
+    #[test]
+    fn t_serialize_deserialize_2d() {
+        let arc = Arc2d::default();
+        let mut bytes = Vec::new();
+        arc.serialize(&mut bytes).unwrap();
+        let restored = Arc2d::deserialize(&bytes[..]).unwrap();
+        assert_eq!(restored.center, arc.center);
+        assert_eq!(restored.start_dir, arc.start_dir);
+        assert_eq!(restored.mid_dir, arc.mid_dir);
+        assert_eq!(restored.end_dir, arc.end_dir);
+        assert_eq!(restored.radius, arc.radius);
+        assert_eq!(restored.angle, arc.angle);
+    }
+
+    #[test]
+    fn t_serialize_deserialize_major_arc() {
+        // Arc3d going the long way (> π) from (1,0,0) through (0,-1,0) to (-1,0,0).
+        let arc = Arc3d::from_three_points(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([0.0, -1.0, 0.0]),
+            DVec([-1.0, 0.0, 0.0]),
+        )
+        .unwrap();
+        let mut bytes = Vec::new();
+        arc.serialize(&mut bytes).unwrap();
+        let restored = Arc3d::deserialize(&bytes[..]).unwrap();
+        assert_eq!(restored.center, arc.center);
+        assert_eq!(restored.start_dir, arc.start_dir);
+        assert_eq!(restored.mid_dir, arc.mid_dir);
+        assert_eq!(restored.end_dir, arc.end_dir);
+        assert_eq!(restored.radius, arc.radius);
+        assert_eq!(restored.angle, arc.angle);
+    }
+
+    #[test]
+    fn t_serialize_deserialize_f32() {
+        let arc = Arc3f::from_three_points(
+            crate::Vec([-1.0, 0.0, 0.0]),
+            crate::Vec([0.0, 1.0, 0.0]),
+            crate::Vec([1.0, 0.0, 0.0]),
+        )
+        .unwrap();
+        let mut bytes = Vec::new();
+        arc.serialize(&mut bytes).unwrap();
+        let restored = Arc3f::deserialize(&bytes[..]).unwrap();
+        assert_eq!(restored.center, arc.center);
+        assert_eq!(restored.start_dir, arc.start_dir);
+        assert_eq!(restored.mid_dir, arc.mid_dir);
+        assert_eq!(restored.end_dir, arc.end_dir);
+        assert_eq!(restored.radius, arc.radius);
+        assert_eq!(restored.angle, arc.angle);
+    }
+
+    #[test]
+    fn t_default_evaluates_without_nan() {
+        // The default must be a genuinely usable arc, not a degenerate
+        // placeholder: every method should produce finite, sensible values.
+        let arc = Arc3d::default();
+        let len = arc.length();
+        assert!(len.is_finite() && len > 0.0);
+        for i in 0..=4 {
+            let t = len * i as f64 / 4.0;
+            let p = arc.point(t).unwrap();
+            assert!(p[0].is_finite() && p[1].is_finite() && p[2].is_finite());
+            let tan = arc.tangent(t).unwrap();
+            assert!((tan.length() - 1.0).abs() < 1e-10);
+        }
+        assert_eq!(arc.start(), DVec([1.0, 0.0, 0.0]));
+        assert_eq!(arc.end(), DVec([0.0, 1.0, 0.0]));
     }
 }
