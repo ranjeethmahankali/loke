@@ -689,8 +689,98 @@ impl<const DIM: usize, A: Adaptor<DIM>> EllipticArc<DIM, A> {
         todo!()
     }
 
-    pub fn bounds(&self) -> (A::Scalar, A::Scalar) {
-        todo!()
+    /// Compute the axis-aligned bounding box of the arc.
+    ///
+    /// Returns `(min_corner, max_corner)`.
+    pub fn bounds(&self) -> (A::Vector, A::Vector)
+    where
+        A: TrigonometryAdaptor,
+    {
+        // DERIVATION
+        //
+        // Notation as in `focii`: the arc is P(φ) = c + cos φ · U + sin φ · V for φ in
+        // [0, θ], with U = start_vec and V = (mid_vec - cos(θ/2) · U) / sin(θ/2).
+        // See `focii` for why.
+        //
+        // 1. Work one coordinate at a time. Let p = U[i], q = V[i]. That coordinate is
+        //        P_i(φ) = c_i + p · cos φ + q · sin φ.
+        //
+        // 2. Extrema of a coordinate are where its derivative is zero:
+        //        dP_i/dφ = -p · sin φ + q · cos φ = 0   =>   p · sin φ = q · cos φ.
+        //    This says the vector (cos φ, sin φ) is parallel to (p, q), so there are two
+        //    solutions, half a turn apart:
+        //        (cos φ, sin φ) = +(p, q)/n   and   (cos φ, sin φ) = -(p, q)/n,
+        //    where n = sqrt(p² + q²).
+        //
+        // 3. The value of the coordinate at each solution.
+        //        +: P_i = c_i + p·(p/n) + q·(q/n) = c_i + (p² + q²)/n = c_i + n   (maximum)
+        //        -: P_i = c_i - n                                                  (minimum)
+        //    If n = 0 (the arc is flat along this coordinate) there is no extremum to
+        //    find, and the endpoints already give the right answer.
+        //
+        // 4. Is a solution inside the arc, i.e. is φ in [0, θ]?
+        //    We avoid computing φ by looking at signs. For an angle φ:
+        //        φ is "past the start" when sin φ >= 0 (φ in [0, π]),
+        //        φ is "before the end" when sin(θ - φ) >= 0.
+        //    Expand the second one with sin(x - y) = sin x cos y - cos x sin y:
+        //        sin(θ - φ) = sin θ · cos φ - cos θ · sin φ.
+        //    For the + solution, sin φ = q/n and cos φ = p/n. Dropping the positive factor
+        //    1/n, which does not change a sign:
+        //        sign(sin φ)       = sign(q)
+        //        sign(sin(θ - φ))  = sign(sin θ · p - cos θ · q)
+        //    The - solution has both signs flipped.
+        //    If θ <= π, φ is in [0, θ] exactly when BOTH conditions hold: the arc is no
+        //    longer than half a turn, so being past the start and before the end pins it.
+        //    If θ > π, the two conditions each cover a part of the arc and overlap, so
+        //    EITHER one is enough.
+        //    Using strict inequalities is fine: an extremum exactly at an endpoint is
+        //    already counted by the endpoints.
+        //
+        // 5. Start from the box of the two endpoints, and widen it by each extremum
+        //    that lies inside the arc. The sqrt in step 3 is only evaluated when needed.
+        let start = A::coord_arr(self.center + self.start_vec);
+        let end = A::coord_arr(self.center + self.end_vec);
+        let mut min: [A::Scalar; DIM] = std::array::from_fn(|i| A::min(start[i], end[i]));
+        let mut max: [A::Scalar; DIM] = std::array::from_fn(|i| A::max(start[i], end[i]));
+        let (sin_h, cos_h) = A::sin_cos(self.angle * A::scalar(0.5));
+        if sin_h < A::epsilon() {
+            // Degenerate arc. The endpoints are the whole story.
+            return (A::vector(min), A::vector(max));
+        }
+        let u = self.start_vec;
+        let v = (self.mid_vec - u * cos_h) / sin_h;
+        let (sin_t, cos_t) = A::sin_cos(self.angle);
+        let short = self.angle <= A::scalar(PI);
+        let zero = A::scalar(0.0);
+        let center = A::coord_arr(self.center);
+        let u = A::coord_arr(u);
+        let v = A::coord_arr(v);
+        for i in 0..DIM {
+            let (p, q) = (u[i], v[i]);
+            let past_start = q;
+            let before_end = sin_t * p - cos_t * q;
+            let (max_in, min_in) = if short {
+                (
+                    past_start > zero && before_end > zero,
+                    past_start < zero && before_end < zero,
+                )
+            } else {
+                (
+                    past_start > zero || before_end > zero,
+                    past_start < zero || before_end < zero,
+                )
+            };
+            if max_in || min_in {
+                let n = A::sqrt(p * p + q * q);
+                if max_in {
+                    max[i] = A::max(max[i], center[i] + n);
+                }
+                if min_in {
+                    min[i] = A::min(min[i], center[i] - n);
+                }
+            }
+        }
+        (A::vector(min), A::vector(max))
     }
 
     pub fn reversed(&self) -> Self {
@@ -3131,6 +3221,175 @@ mod test {
         let same = (a1 - b1).length() + (a2 - b2).length();
         let swapped = (a1 - b2).length() + (a2 - b1).length();
         assert!(same.min(swapped) < 1e-9);
+    }
+
+    // ===================== EllipticArc::bounds =====================
+
+    /// Bounding box of `n + 1` samples along the arc.
+    fn sampled_bounds<const DIM: usize>(
+        earc: &EllipticArc<DIM, F64Adaptor>,
+        n: usize,
+    ) -> ([f64; DIM], [f64; DIM]) {
+        let mut min = [<f64>::INFINITY; DIM];
+        let mut max = [<f64>::NEG_INFINITY; DIM];
+        for i in 0..=n {
+            let p = earc.point(i as f64 / n as f64).unwrap();
+            for k in 0..DIM {
+                min[k] = min[k].min(p.0[k]);
+                max[k] = max[k].max(p.0[k]);
+            }
+        }
+        (min, max)
+    }
+
+    /// The exact bounds must contain every sample, and be within sampling error of the
+    /// sampled bounds.
+    fn assert_bounds_match_sampling<const DIM: usize>(
+        earc: &EllipticArc<DIM, F64Adaptor>,
+        label: &str,
+    ) {
+        let (lo, hi) = earc.bounds();
+        let (slo, shi) = sampled_bounds(earc, 20000);
+        for k in 0..DIM {
+            assert!(
+                lo.0[k] <= slo[k] + 1e-12 && slo[k] - lo.0[k] < 1e-6,
+                "{label}: min[{k}] = {}, sampled {}",
+                lo.0[k],
+                slo[k]
+            );
+            assert!(
+                hi.0[k] >= shi[k] - 1e-12 && hi.0[k] - shi[k] < 1e-6,
+                "{label}: max[{k}] = {}, sampled {}",
+                hi.0[k],
+                shi[k]
+            );
+        }
+    }
+
+    #[test]
+    fn t_elliptic_bounds_axis_aligned() {
+        // Full-ish ellipse, semi-axes 5 and 3 around (1, 2, 3).
+        let c = DVec([1.0, 2.0, 3.0]);
+        let earc = swept_arc(c, DVec([5.0, 0.0, 0.0]), DVec([0.0, 3.0, 0.0]), 6.0);
+        let (lo, hi) = earc.bounds();
+        // The sweep (6.0 of 2π) covers nearly the whole ellipse, including both ends of
+        // each axis: the start itself is the +x extreme.
+        assert!((lo[0] + 4.0).abs() < 1e-10, "{lo:?}");
+        assert!((hi[0] - 6.0).abs() < 1e-10, "{hi:?}");
+        assert!((lo[1] + 1.0).abs() < 1e-10, "{lo:?}");
+        assert!((hi[1] - 5.0).abs() < 1e-10, "{hi:?}");
+        assert!((lo[2] - 3.0).abs() < 1e-10 && (hi[2] - 3.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn t_elliptic_bounds_tilted_pairs() {
+        let c = DVec([0.5, -1.0, 2.0]);
+        let u = DVec([1.0, 0.0, 0.0]);
+        let v = DVec([1.0, 1.0, 0.0]);
+        // Includes a semicircle sweep and sweeps of every size.
+        for theta in [0.3, 1.0, 1.5, PI / 2.0, 2.0, PI, 3.5, 4.0, 5.0, 5.5, 6.2] {
+            assert_bounds_match_sampling(&swept_arc(c, u, v, theta), &format!("theta={theta}"));
+        }
+    }
+
+    #[test]
+    fn t_elliptic_bounds_out_of_plane_vectors() {
+        // All three coordinates vary, and the pair is far from perpendicular.
+        let c = DVec([-3.0, 4.0, 1.0]);
+        let u = DVec([2.0, -1.0, 0.5]);
+        let v = DVec([0.3, 1.7, -2.2]);
+        for theta in [0.4, 1.2, PI, 2.8, 4.4, 5.9] {
+            assert_bounds_match_sampling(&swept_arc(c, u, v, theta), &format!("theta={theta}"));
+        }
+    }
+
+    #[test]
+    fn t_elliptic_bounds_every_start_phase() {
+        // Rotating the starting point around the ellipse moves the extrema in and out of
+        // the arc. Sweep through all phases, for short, half, and long arcs.
+        let c = DVec([0.0, 0.0, 0.0]);
+        let u0 = DVec([3.0, 0.0, 0.0]);
+        let v0 = DVec([0.0, 1.0, 0.0]);
+        for theta in [1.0, PI, 4.5] {
+            for k in 0..24 {
+                let phase = TAU * k as f64 / 24.0;
+                let (s, co) = phase.sin_cos();
+                let u = u0 * co + v0 * s;
+                let v = v0 * co - u0 * s;
+                assert_bounds_match_sampling(
+                    &swept_arc(c, u, v, theta),
+                    &format!("theta={theta} phase={phase}"),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn t_elliptic_bounds_projected_arc() {
+        let arc = Arc3d::from_three_points(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([FRAC_1_SQRT_2, FRAC_1_SQRT_2, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+        )
+        .unwrap();
+        let normal = DVec([1.0, 1.0, 1.0]).normalize();
+        let earc = EllipticArc3d::from_projected_arc(&arc, DVec([0.0, 0.0, 1.0]), normal).unwrap();
+        assert_bounds_match_sampling(&earc, "projected minor");
+        let major = Arc3d::from_three_points(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([0.0, -1.0, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+        )
+        .unwrap();
+        let earc = EllipticArc3d::from_projected_arc(&major, DVec([0.0, 0.0, 0.0]), normal).unwrap();
+        assert_bounds_match_sampling(&earc, "projected major");
+    }
+
+    #[test]
+    fn t_elliptic_bounds_matches_circular_arc() {
+        let cases = [
+            // Minor, semicircle, major, and 3D tilted.
+            ([1.0, 0.0, 0.0], [FRAC_1_SQRT_2, FRAC_1_SQRT_2, 0.0], [0.0, 1.0, 0.0]),
+            ([-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]),
+            ([1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 1.0, 0.0]),
+            ([3.0, 1.0, 2.0], [0.0, 2.0, 1.0], [-2.0, 1.0, 4.0]),
+            ([10.0, 5.0, 0.0], [7.0, 8.0, 0.0], [4.0, 5.0, 0.0]),
+        ];
+        for (i, (a, b, c)) in cases.into_iter().enumerate() {
+            let arc = Arc3d::from_three_points(DVec(a), DVec(b), DVec(c)).unwrap();
+            let earc: EllipticArc3d = (&arc).into();
+            let (alo, ahi) = arc.bounds();
+            let (elo, ehi) = earc.bounds();
+            assert!((alo - elo).length() < 1e-9, "case {i}: {alo:?} vs {elo:?}");
+            assert!((ahi - ehi).length() < 1e-9, "case {i}: {ahi:?} vs {ehi:?}");
+        }
+    }
+
+    #[test]
+    fn t_elliptic_bounds_2d() {
+        let at = |phi: f64| DVec([2.0 * phi.cos() + phi.sin(), 0.5 * phi.sin()]);
+        let theta = 4.0;
+        let earc = EllipticArc2d {
+            center: DVec([1.0, 1.0]),
+            start_vec: at(0.0),
+            mid_vec: at(theta / 2.0),
+            end_vec: at(theta),
+            angle: theta,
+        };
+        assert_bounds_match_sampling(&earc, "2d");
+    }
+
+    #[test]
+    fn t_elliptic_bounds_reversed() {
+        let earc = swept_arc(
+            DVec([0.0, 0.0, 0.0]),
+            DVec([1.0, 0.0, 0.0]),
+            DVec([1.0, 1.0, 0.0]),
+            2.5,
+        );
+        let (lo, hi) = earc.bounds();
+        let (rlo, rhi) = earc.reversed().bounds();
+        assert!((lo - rlo).length() < 1e-9 && (hi - rhi).length() < 1e-9);
     }
 
     // ===================== EllipticArc::point and tangent =====================
