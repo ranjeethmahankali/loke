@@ -254,16 +254,24 @@ where
 
     /// Uniformly sample the arc with the given tolerance (max chord deviation).
     /// For a circle, the chord error at step angle α is `r(1 - cos(α/2))`.
-    /// Solving for α: `α = 2 * acos(1 - tolerance/r)`.
+    /// Solving for α: `α = 2 * acos(1 - tolerance/r) = 4 * asin(sqrt(tolerance/2r))`. The
+    /// second form keeps full precision for small tolerances (ELLIPSE ARC MATH §8.3).
     pub fn adaptive_samples(&self, tolerance: A::Scalar) -> impl Iterator<Item = A::Vector>
     where
         A: TrigonometryAdaptor,
     {
         let ang_step = if self.radius > A::epsilon() && tolerance > A::scalar(0.0) {
-            A::scalar(2.0)
-                * A::acos(A::scalar(1.0) - A::min(tolerance / self.radius, A::scalar(1.0)))
+            A::scalar(4.0)
+                * A::asin(A::sqrt(
+                    A::scalar(0.5) * A::min(tolerance / self.radius, A::scalar(1.0)),
+                ))
         } else {
-            A::scalar(0.1) // fallback
+            A::scalar(0.0)
+        };
+        let ang_step = if ang_step > A::scalar(0.0) {
+            ang_step
+        } else {
+            A::scalar(0.1) // fallback, also when the step underflows
         };
         let half_angle = A::scalar(0.5) * self.angle;
         let n = if self.angle < A::epsilon() {
@@ -673,6 +681,49 @@ Notation: c = center, S = start_vec, T = mid_vec, θ = angle, h = θ/2.
        of the "zeroth" derivative,
            d_0 = P - c,   d_1 = P',   d_{k+2} = -θ² d_k.
        The slerp form gives d_0 and d_1, and the rest is repeated scaling.
+
+§8 Adaptive sampling
+
+   Equal steps Δ in φ, sized for the worst point on the ellipse.
+
+   8.1 Error of one span.
+       For the points at φ and φ + Δ, the sum-to-product identities
+           cos x + cos y = 2 cos((x + y)/2) cos((x - y)/2)
+           sin x + sin y = 2 sin((x + y)/2) cos((x - y)/2)
+       applied to §1 give
+           (P(φ) + P(φ + Δ))/2 - c = cos(Δ/2) · (P(φ + Δ/2) - c).
+       So the chord midpoint and the curve midpoint differ by
+           g = (1 - cos(Δ/2)) · (P(φ + Δ/2) - c),    |g| <= (1 - cos(Δ/2)) · A,
+       since |P - c| <= A (§3.2).
+
+   8.2 g bounds the distance of the whole span from its chord segment, when Δ <= π.
+       On a circle, an arc of at most half a turn lies inside the rectangle with sides
+       "chord" and "sagitta". The ellipse is an affine image of a circle (§3.3), and the
+       affine map sends that rectangle to the parallelogram with sides "chord" and g. So
+       every point of the span is a point of the chord segment plus at most g, and lies
+       within |g| of the segment. The bound is tight near the ends of the major axis.
+
+   8.3 The step.
+       Solve (1 - cos(Δ/2)) · A = tol for Δ. With 1 - cos x = 2 sin²(x/2),
+           Δ = 2 acos(1 - tol/A) = 4 asin(sqrt(tol/(2A))).
+       The two are equal, but the first rounds 1 - tol/A and loses the low bits of tol/A:
+       in f32, Δ is off by percents at tol/A = 1e-6, and is zero below about 6e-8. The
+       second keeps full relative precision. Clamping tol/A to 1 gives at most Δ = π, as
+       8.2 needs. Then n = max(1, ceil(θ/Δ)) and Δ = θ/n makes the steps equal. For a
+       circle A = r, and this is the step of `Arc::adaptive_samples`.
+
+   8.4 Evaluation without per-point trig.
+       Rotating (cos φ, sin φ) by Δ is
+           cos(φ + Δ) = cos φ cos Δ - sin φ sin Δ
+           sin(φ + Δ) = sin φ cos Δ + cos φ sin Δ,
+       so (cos Δ, sin Δ) is computed once and each point costs 4 multiplies and 2 adds
+       before P = c + cos φ U + sin φ V.
+
+   8.5 Drift.
+       Each rotation adds about ε of error, so after k steps it is about k ε, which is
+       about 1e-4 relative in f32 after 1000 points. Re-seeding (cos φ, sin φ) exactly
+       with sin_cos(k Δ) every 32 steps keeps it below about 32 ε. The first and last points are
+       `start()` and `end()`, not the recurrence.
 */
 
 impl<const DIM: usize, A: Adaptor<DIM>> EllipticArc<DIM, A> {
@@ -985,6 +1036,66 @@ impl<const DIM: usize, A: Adaptor<DIM>> EllipticArc<DIM, A> {
             }
         }
         (A::vector(min), A::vector(max))
+    }
+
+    /// Sample the arc so the polyline through the samples is within `tolerance` of the arc.
+    /// The first and last samples are exactly [`Self::start`] and [`Self::end`].
+    pub fn adaptive_samples(&self, tolerance: A::Scalar) -> impl Iterator<Item = A::Vector>
+    where
+        A: TrigonometryAdaptor,
+    {
+        // ELLIPSE ARC MATH §8.
+        let (zero, half, one) = (A::scalar(0.0), A::scalar(0.5), A::scalar(1.0));
+        let (sin_h, cos_h) = A::sin_cos(self.angle * half);
+        let u = self.start_vec;
+        let (v, n, step) = if sin_h < A::epsilon() {
+            (u, 1, zero) // Degenerate: just the endpoints.
+        } else {
+            let v = (self.mid_vec - u * cos_h) / sin_h;
+            let (a, b, d) = (
+                A::dot_product(u, u),
+                A::dot_product(v, v),
+                A::dot_product(u, v),
+            );
+            let diff = a - b;
+            let semi_major =
+                A::sqrt((a + b + A::sqrt(diff * diff + A::scalar(4.0) * d * d)) * half);
+            let max_step = if semi_major > A::epsilon() && tolerance > zero {
+                // §8.3
+                A::scalar(4.0) * A::asin(A::sqrt(half * A::min(tolerance / semi_major, one)))
+            } else {
+                zero
+            };
+            let max_step = if max_step > zero {
+                max_step
+            } else {
+                A::scalar(0.1) // fallback, also when the step underflows
+            };
+            let n = A::to_usize(A::ceil(self.angle / max_step)).max(1);
+            (v, n, self.angle / A::scalar(n as f64))
+        };
+        let (sin_d, cos_d) = A::sin_cos(step);
+        let (mut cos_p, mut sin_p) = (one, zero);
+        let mut k = 0;
+        std::iter::from_fn(move || {
+            let pt = if k == 0 {
+                self.start()
+            } else if k < n {
+                // §8.4, re-seeded every 32 steps (§8.5).
+                (sin_p, cos_p) = if k % 32 == 0 {
+                    A::sin_cos(A::scalar(k as f64) * step)
+                } else {
+                    (sin_p * cos_d + cos_p * sin_d, cos_p * cos_d - sin_p * sin_d)
+                };
+                self.center + u * cos_p + v * sin_p
+            } else if k == n {
+                self.end()
+            } else {
+                return None;
+            };
+            k += 1;
+            Some(pt)
+        })
     }
 
     pub fn reversed(&self) -> Self {
@@ -4150,6 +4261,238 @@ mod test {
         assert!((r[1] - earc.tangent(0.3).unwrap()).length() < 1e-12);
         // d_3 = -θ² d_1.
         assert!((r[3] - r[1] * -(theta * theta)).length() < 1e-10);
+    }
+
+    // ===================== EllipticArc::adaptive_samples =====================
+
+    /// The step of ELLIPSE ARC MATH §8.3, in f64, for semi-major length `a`.
+    fn adaptive_step(tol: f64, a: f64) -> f64 {
+        4.0 * (0.5 * (tol / a).min(1.0)).sqrt().asin()
+    }
+
+    fn semi_major(earc: &EllipticArc3d) -> f64 {
+        let (s, c) = (earc.angle / 2.0).sin_cos();
+        let u = earc.start_vec;
+        let v = (earc.mid_vec - u * c) / s;
+        let (a, b, d) = (u.dot(u), v.dot(v), u.dot(v));
+        ((a + b + ((a - b) * (a - b) + 4.0 * d * d).sqrt()) / 2.0).sqrt()
+    }
+
+    /// Every pair of consecutive samples: densely sampled curve points between them are
+    /// within `tol` of the chord segment.
+    fn assert_samples_within(earc: &EllipticArc3d, tol: f64, label: &str) {
+        let samples: Vec<DVec3> = earc.adaptive_samples(tol).collect();
+        assert_eq!(samples[0], earc.start(), "{label}");
+        assert_eq!(*samples.last().unwrap(), earc.end(), "{label}");
+        let n = samples.len() - 1;
+        for (i, pair) in samples.windows(2).enumerate() {
+            let chord = pair[1] - pair[0];
+            let len_sq = chord.dot(chord);
+            for j in 0..=50 {
+                let t = (i as f64 + j as f64 / 50.0) / n as f64;
+                let p = earc.point(t.min(1.0)).unwrap();
+                let s = if len_sq > 0.0 {
+                    ((p - pair[0]).dot(chord) / len_sq).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let dist = (p - (pair[0] + chord * s)).length();
+                assert!(
+                    dist <= tol * (1.0 + 1e-9) + 1e-12,
+                    "{label}: span {i}/{n}, j={j}: dist {dist} > tol {tol}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn t_elliptic_adaptive_samples_deviation() {
+        let c = DVec([0.7, -1.3, 2.1]);
+        let tilted = |theta| swept_arc(c, DVec([2.3, 0.4, -0.6]), DVec([-0.9, 1.7, 0.8]), theta);
+        let thin = |ratio: f64, theta| {
+            swept_arc(
+                c,
+                DVec([3.1, 0.0, 0.0]),
+                DVec([0.0, 3.1 / ratio, 0.0]),
+                theta,
+            )
+        };
+        let near_full = EllipticArc3d::from_center_start_end(
+            c,
+            c + DVec([2.6, 0.3, -0.2]),
+            c + DVec([2.1, 1.2, 0.4]),
+            true,
+        )
+        .unwrap();
+        let major = Arc3d::from_three_points(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([0.0, -1.0, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+        )
+        .unwrap();
+        let projected = EllipticArc3d::from_projected_arc(
+            &major,
+            DVec([0.0, 0.0, 0.3]),
+            DVec([0.4, -0.7, 1.1]).normalize(),
+        )
+        .unwrap();
+        let cases = [
+            (tilted(1.37), "tilted minor"),
+            (tilted(4.61), "tilted major"),
+            (tilted(PI), "tilted semicircle"),
+            (thin(2.0, 2.93), "thin 2:1"),
+            (thin(10.0, 5.17), "thin 10:1"),
+            (thin(100.0, 3.83), "thin 100:1"),
+            (near_full, "near full turn"),
+            (projected, "projected major"),
+        ];
+        for (earc, label) in &cases {
+            for tol in [0.0137, 0.00211, 0.383] {
+                assert_samples_within(earc, tol, &format!("{label}, tol={tol}"));
+            }
+        }
+        assert!(cases[6].0.angle() > TAU - 0.5);
+    }
+
+    #[test]
+    fn t_elliptic_adaptive_samples_count() {
+        let c = DVec([-0.4, 1.9, 0.2]);
+        for (a, b, theta, tol) in [
+            (2.7, 1.1, 1.93, 0.0083),
+            (0.61, 4.4, 5.29, 0.00047),
+            (13.0, 0.13, 3.71, 0.029),
+        ] {
+            let earc = swept_arc(c, DVec([a, 0.0, 0.0]), DVec([0.0, b, 0.0]), theta);
+            let expected = (theta / adaptive_step(tol, a.max(b))).ceil() as usize + 1;
+            assert_eq!(earc.adaptive_samples(tol).count(), expected, "a={a} b={b}");
+        }
+    }
+
+    #[test]
+    fn t_elliptic_adaptive_samples_matches_circular_arc() {
+        let arcs = [
+            Arc3d::from_three_points(
+                DVec([3.2, 0.0, 0.0]),
+                DVec([0.0, 3.2, 0.0]),
+                DVec([-3.2, 0.0, 0.0]),
+            ),
+            Arc3d::from_three_points(
+                DVec([1.3, 0.4, -0.2]),
+                DVec([0.1, 1.7, 0.9]),
+                DVec([-1.1, -0.3, 0.6]),
+            ),
+            Arc3d::from_three_points(
+                DVec([1.0, 0.0, 0.0]),
+                DVec([0.0, -1.0, 0.0]),
+                DVec([0.0, 1.0, 0.0]),
+            ),
+        ];
+        for (i, arc) in arcs.into_iter().enumerate() {
+            let arc = arc.unwrap();
+            let earc = EllipticArc3d::from(&arc);
+            for tol in [0.0071, 0.00013, 0.19] {
+                let step = adaptive_step(tol, arc.radius());
+                let theta = arc.angle();
+                let arc_count = arc.adaptive_samples(tol).count();
+                let earc_count = earc.adaptive_samples(tol).count();
+                assert_eq!(
+                    arc_count,
+                    2 * (theta / (2.0 * step)).ceil() as usize + 1,
+                    "{i}"
+                );
+                assert_eq!(earc_count, (theta / step).ceil() as usize + 1, "{i}");
+                assert!(
+                    arc_count - earc_count <= 1,
+                    "{i}: {arc_count} vs {earc_count}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn t_elliptic_adaptive_samples_f32_drift() {
+        // 3000+ points: the rotation recurrence alone would drift by ~3000 ε.
+        let (c, u, v, theta) = ([0.3, -0.8, 1.2], [2.9, 0.7, -0.4], [-0.6, 1.3, 0.5], 5.37);
+        let at = |phi: f64| DVec(std::array::from_fn(|i| u[i] * phi.cos() + v[i] * phi.sin()));
+        let narrow = |v: DVec3| crate::Vec::<3>([v.0[0] as f32, v.0[1] as f32, v.0[2] as f32]);
+        let earc = EllipticArc3f {
+            center: narrow(DVec(c)),
+            start_vec: narrow(at(0.0)),
+            mid_vec: narrow(at(theta / 2.0)),
+            end_vec: narrow(at(theta)),
+            angle: theta as f32,
+        };
+        // f64 reference built from the stored f32 vectors.
+        let wide = |v: crate::Vec<3>| DVec(v.0.map(f64::from));
+        let reference = EllipticArc3d {
+            center: wide(earc.center),
+            start_vec: wide(earc.start_vec),
+            mid_vec: wide(earc.mid_vec),
+            end_vec: wide(earc.end_vec),
+            angle: earc.angle as f64,
+        };
+        let scale = semi_major(&reference);
+        let samples: Vec<_> = earc.adaptive_samples(1e-6).collect();
+        let n = samples.len() - 1;
+        assert!(n > 3000, "{n}");
+        let mut worst = 0.0f64;
+        for (k, p) in samples.iter().enumerate() {
+            let expected = reference.point(k as f64 / n as f64).unwrap();
+            worst = worst.max((wide(*p) - expected).length());
+        }
+        assert!(worst < 64.0 * f32::EPSILON as f64 * scale, "worst {worst}");
+    }
+
+    #[test]
+    fn t_elliptic_adaptive_samples_edge_tolerances() {
+        let c = DVec([1.1, 0.0, -0.7]);
+        let (a, theta) = (2.3, 4.27);
+        let earc = swept_arc(c, DVec([a, 0.0, 0.0]), DVec([0.0, 0.9, 0.4]), theta);
+        // tolerance <= 0: fixed 0.1 rad step.
+        let fallback = (theta / 0.1).ceil() as usize + 1;
+        assert_eq!(earc.adaptive_samples(0.0).count(), fallback);
+        assert_eq!(earc.adaptive_samples(-0.5).count(), fallback);
+        // tolerance >= A: the step is clamped to π.
+        let coarse = (theta / PI).ceil() as usize + 1;
+        assert_eq!(earc.adaptive_samples(semi_major(&earc)).count(), coarse);
+        assert_eq!(earc.adaptive_samples(51.0).count(), coarse);
+        assert_samples_within(&earc, 51.0, "huge tolerance");
+        // Degenerate sweep: just the endpoints.
+        let empty = swept_arc(c, DVec([a, 0.0, 0.0]), DVec([0.0, 0.9, 0.0]), 0.0);
+        let samples: Vec<_> = empty.adaptive_samples(0.01).collect();
+        assert_eq!(samples, vec![empty.start(), empty.end()]);
+    }
+
+    #[test]
+    fn t_elliptic_adaptive_samples_tiny_f32_tolerance() {
+        // tol/A ~ 1e-9: 1 - tol/A rounds to 1 in f32, so the acos form of the step would be 0.
+        let (a, theta) = (3.7f32, 1.29f32);
+        let earc = EllipticArc3f {
+            center: crate::Vec([0.0, 0.0, 0.0]),
+            start_vec: crate::Vec([a, 0.0, 0.0]),
+            mid_vec: crate::Vec([a * (theta / 2.0).cos(), 1.3 * (theta / 2.0).sin(), 0.0]),
+            end_vec: crate::Vec([a * theta.cos(), 1.3 * theta.sin(), 0.0]),
+            angle: theta,
+        };
+        let tol = 3.7e-9;
+        let expected = (theta as f64 / adaptive_step(tol as f64, a as f64)).ceil() as usize + 1;
+        let count = earc.adaptive_samples(tol).count();
+        assert!(count.abs_diff(expected) <= 1, "{count} vs {expected}");
+    }
+
+    #[test]
+    fn t_adaptive_samples_tiny_f32_tolerance() {
+        let arc = Arc3f::from_three_points(
+            crate::Vec([2.9, 0.0, 0.0]),
+            crate::Vec([0.0, 2.9, 0.0]),
+            crate::Vec([-2.9, 0.0, 0.0]),
+        )
+        .unwrap();
+        let tol = 4.1e-9;
+        let step = adaptive_step(tol as f64, arc.radius() as f64);
+        let expected = 2 * (arc.angle() as f64 / (2.0 * step)).ceil() as usize + 1;
+        let count = arc.adaptive_samples(tol).count();
+        assert!(count.abs_diff(expected) <= 2, "{count} vs {expected}");
     }
 
     // ===================== EllipticArc::point and tangent =====================

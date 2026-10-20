@@ -55,7 +55,8 @@
   - Emit the first and last points exactly from =start()= and =end()=, never
     from a recurrence.
   - Degenerate arcs (=sin(θ/2) < ε=) yield just the two endpoints. If
-    =tolerance <= 0=, fall back to a fixed angle step as =Arc= does (0.1 rad).
+    =tolerance <= 0= or =A < ε=, fall back to a fixed angle step as =Arc=
+    does (0.1 rad).
     Clamp =tol/A= to at most 1 so the step is never NaN.
   - Add benches =elliptic_arc_adaptive_samples= and =elliptic_arc_uniform_samples=
     in =benches/bench.rs=, next to =arc_adaptive_samples=.
@@ -79,14 +80,25 @@
       =(P(φ) + P(φ+Δ))/2 − c = cos(Δ/2) · (P(φ + Δ/2) − c)=.
       So the gap between the chord's midpoint and the curve's midpoint is
       =(1 − cos(Δ/2))·(P_mid − c)=, whose length is at most =(1 − cos(Δ/2))·A=.
-   2. That gap is the maximum error over the whole span. The ellipse is an
-      affine image of a circle, and affine maps preserve parallelism. On the
-      circle, the point farthest from the chord is the one whose tangent is
-      parallel to the chord, which is the midpoint, so the same holds on the
-      ellipse. The bound is tight near the ends of the major axis.
-   3. Step: =Δ = 2·acos(1 − tol/A)=, then =n = max(1, ceil(θ/Δ))= and use
-      =Δ = θ/n= so the steps are equal. Emit =n + 1= points. For a circle
-      (=A = r=) this is exactly =Arc::adaptive_samples='s step.
+   2. That gap bounds the distance from every point of the span to the chord
+      *segment*, provided =Δ <= π=. On a circle, an arc of at most a half turn
+      lies inside the rectangle with sides "chord" and "sagitta". The ellipse
+      is an affine image of the circle, and affine maps send that rectangle to
+      a parallelogram with sides "chord" and =g = (1 − cos(Δ/2))·(P_mid − c)=.
+      Every curve point is a point of the chord plus at most =g=, so it is
+      within =|g| <= (1 − cos(Δ/2))·A= of the segment. The bound is tight near
+      the ends of the major axis.
+   3. Step: =Δ = 4·asin(sqrt(tol/(2A)))=, which equals =2·acos(1 − tol/A)=
+      (=1 − cos x = 2 sin²(x/2)=) but keeps full relative precision for small
+      =tol/A=, where =1 − tol/A= rounds away the low bits of =tol/A= (in f32,
+      =Δ= is off by several percent at =tol/A = 1e-6=, and is 0 below about
+      =6e-8=). Add =asin= to =TrigonometryAdaptor=, and switch
+      =Arc::adaptive_samples= to the same form so the two stay bit-identical.
+      Clamping =tol/A= to 1 gives =Δ = π=, so 2. applies. Then
+      =n = max(1, ceil(θ/Δ))= and use =Δ = θ/n= so the steps are equal. Emit
+      =n + 1= points. For a circle (=A = r=) the step is exactly
+      =Arc::adaptive_samples='s. If =Δ= underflows to 0 (=tol/2A= below the
+      smallest float), use the 0.1 rad fallback.
    4. Evaluation without per-point trig. Compute =(cos Δ, sin Δ)= once with
       =sin_cos=. Advance =(cos φ, sin φ)= by rotating it with that pair (4
       multiplies, 2 adds), and emit =c + cos φ·U + sin φ·V=.
@@ -95,8 +107,10 @@
       Re-seed =(cos φ, sin φ)= exactly with =sin_cos(k·Δ)= every 32 steps.
    6. Tests:
       - For every pair of consecutive samples, densely sampled curve points
-        between them are within =tolerance= of the chord, over a variety of
-        tilted, thin (A:B up to 100:1), major, semicircle and projected arcs.
+        between them are within =tolerance= of the chord segment (clamped
+        projection), over a variety of
+        tilted, thin (A:B up to 100:1), major, semicircle, near-full-turn
+        (=θ= close to 2π, built with =flip_dir=) and projected arcs.
       - The point count is =ceil(θ/Δ) + 1=.
       - For circular arcs (=EllipticArc::from(&arc)=), the step angle equals
         =Arc='s and the point count is within one of =Arc::adaptive_samples=
@@ -105,6 +119,8 @@
       - An =EllipticArc3f= with a tight tolerance (1000+ points) stays within a
         small multiple of f32 ε of =point(t)= at every sample.
       - =tolerance <= 0= and =tolerance >= A= behave as described above.
+      - A tiny f32 tolerance (=tol/A= around 1e-9) still yields a finite,
+        correct sample count.
 
    Known trade-off, not to be done now: equal steps use more points than
    needed on the flat parts of thin ellipses. A curvature-driven step needs

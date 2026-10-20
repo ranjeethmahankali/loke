@@ -364,6 +364,11 @@ impl TrigonometryAdaptor for F32Adaptor {
     }
 
     #[inline(always)]
+    fn asin(x: Self::Float) -> Self::Float {
+        x.asin()
+    }
+
+    #[inline(always)]
     fn atan2(y: Self::Float, x: Self::Float) -> Self::Float {
         y.atan2(x)
     }
@@ -452,6 +457,11 @@ impl TrigonometryAdaptor for F64Adaptor {
     #[inline(always)]
     fn acos(x: Self::Float) -> Self::Float {
         x.acos()
+    }
+
+    #[inline(always)]
+    fn asin(x: Self::Float) -> Self::Float {
+        x.asin()
     }
 
     #[inline(always)]

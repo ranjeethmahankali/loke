@@ -1,5 +1,5 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use loke::{Arc3d, DVec, F64Adaptor, Spline3d, polynomial_roots};
+use loke::{Arc3d, DVec, EllipticArc3d, F64Adaptor, Spline3d, polynomial_roots};
 use rand::{RngExt, SeedableRng, rngs::SmallRng};
 
 // ---------------------------------------------------------------------------
@@ -180,6 +180,23 @@ fn b_arc_adaptive_samples(c: &mut Criterion) {
     });
 }
 
+fn b_elliptic_arc_adaptive_samples(c: &mut Criterion) {
+    let earc = EllipticArc3d::from_center_start_end(
+        DVec([-3.0, 0.0, 0.0]), // center
+        DVec([-0.5, 0.3, 0.0]), // start
+        DVec([-3.2, 1.1, 0.0]), // end
+        false,
+    )
+    .unwrap();
+    let mut buf = Vec::new();
+    c.bench_function("elliptic_arc_adaptive_samples", |b| {
+        buf.clear();
+        b.iter(|| {
+            buf.extend(black_box(earc.adaptive_samples(0.00001)));
+        });
+    });
+}
+
 fn benchmarks(c: &mut Criterion) {
     b_root_finding::<4>(c, "degree_03_root_finding");
     b_root_finding::<5>(c, "degree_04_root_finding");
@@ -191,6 +208,7 @@ fn benchmarks(c: &mut Criterion) {
     b_root_finding::<11>(c, "degree_10_root_finding");
     b_spline_adaptive_samples(c);
     b_arc_adaptive_samples(c);
+    b_elliptic_arc_adaptive_samples(c);
     b_spline_length(c);
     b_spline_bounds(c);
     b_spline_eval(c);
