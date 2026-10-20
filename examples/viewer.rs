@@ -22,9 +22,17 @@ impl ScalarAdaptor for GlamAdaptor {
     fn is_finite(x: f32) -> bool {
         x.is_finite()
     }
+    /// `x * a + b`, fused only with the `fma` target feature (see `F32Adaptor::mul_add`).
     #[inline(always)]
     fn mul_add(x: f32, a: f32, b: f32) -> f32 {
-        x.mul_add(a, b)
+        #[cfg(target_feature = "fma")]
+        {
+            x.mul_add(a, b)
+        }
+        #[cfg(not(target_feature = "fma"))]
+        {
+            x * a + b
+        }
     }
     #[inline(always)]
     fn scalar(val: f64) -> f32 {
