@@ -140,6 +140,7 @@ impl Adaptor<3> for GlamAdaptor {
 
 type Spline = loke::Spline<3, GlamAdaptor>;
 type Arc = loke::Arc<3, GlamAdaptor>;
+type EllipticArc = loke::EllipticArc<3, GlamAdaptor>;
 
 use wgpu::util::DeviceExt;
 use winit::{
@@ -239,6 +240,15 @@ const CTRL_CAGE_COLOR: [f32; 4] = [0.7, 0.35, 0.3, 0.8];
 const BBOX_COLOR: [f32; 4] = [0.35, 0.3, 0.9, 0.3];
 const POINT_COLOR: [f32; 4] = [1.0, 0.4, 0.1, 1.0];
 const INPUT_POINT_COLOR: [f32; 4] = [0.8, 0.8, 0.75, 1.0];
+const ELLIPSE_COLOR: [f32; 4] = [0.3, 0.85, 0.95, 1.0];
+const SAMPLE_COLOR: [f32; 4] = [0.95, 0.85, 0.2, 1.0];
+
+const DEFAULT_TOLERANCE: f32 = 0.001;
+/// Repetitions of `adaptive_samples` per curve when timing, so the timer resolution is
+/// not the measurement.
+const TIMING_REPS: u32 = 200;
+/// Curve points checked against the chord of every span when measuring the error.
+const ERROR_PROBES: usize = 16;
 
 // ---------- Scene trait ----------
 
@@ -248,6 +258,7 @@ trait Scene {
         inputs: &[Vec3],
         splines: &mut Vec<Spline>,
         arcs: &mut Vec<Arc>,
+        ellipses: &mut Vec<EllipticArc>,
         points: &mut Vec<Vec3>,
     );
 }
@@ -371,7 +382,12 @@ struct App<S: Scene> {
     inputs: Box<[Vec3]>,
     out_splines: Vec<Spline>,
     out_arcs: Vec<Arc>,
+    out_ellipses: Vec<EllipticArc>,
     out_points: Vec<Vec3>,
+    // Sampling
+    tolerance: f32,
+    show_samples: bool,
+    stats: String,
     // Render data built from scene outputs
     vertices: Vec<Vertex>,
     points: Vec<PointInstance>,
@@ -396,8 +412,15 @@ impl<S: Scene> App<S> {
         let inputs = S::init();
         let mut out_splines = Vec::new();
         let mut out_arcs = Vec::new();
+        let mut out_ellipses = Vec::new();
         let mut out_points = Vec::new();
-        S::update(&inputs, &mut out_splines, &mut out_arcs, &mut out_points);
+        S::update(
+            &inputs,
+            &mut out_splines,
+            &mut out_arcs,
+            &mut out_ellipses,
+            &mut out_points,
+        );
 
         let draggable = inputs
             .iter()
@@ -414,7 +437,11 @@ impl<S: Scene> App<S> {
             inputs,
             out_splines,
             out_arcs,
+            out_ellipses,
             out_points,
+            tolerance: DEFAULT_TOLERANCE,
+            show_samples: false,
+            stats: String::new(),
             vertices: Vec::new(),
             points: Vec::new(),
             line_strips: Vec::new(),
@@ -431,6 +458,7 @@ impl<S: Scene> App<S> {
             _phantom: PhantomData,
         };
         app.rebuild_geometry();
+        println!("{}", app.stats);
         let bbox = bounding_box(&app.vertices, &app.points);
         let center = (bbox.0 + bbox.1) * 0.5;
         let radius = (bbox.1 - bbox.0).length() * 0.5;
@@ -457,7 +485,7 @@ impl<S: Scene> App<S> {
             let start = self.vertices.len() as u32;
             // Solid curve (arc_len=0 → never dashed)
             self.vertices
-                .extend(spline.adaptive_samples(0.001).map(|p| Vertex {
+                .extend(spline.adaptive_samples(self.tolerance).map(|p| Vertex {
                     pos: p.into(),
                     color: SPLINE_COLOR,
                     arc_len: 0.0,
@@ -485,7 +513,7 @@ impl<S: Scene> App<S> {
         for arc in &self.out_arcs {
             let start = self.vertices.len() as u32;
             self.vertices
-                .extend(arc.adaptive_samples(0.001).map(|p| Vertex {
+                .extend(arc.adaptive_samples(self.tolerance).map(|p| Vertex {
                     pos: p.into(),
                     color: SPLINE_COLOR,
                     arc_len: 0.0,
@@ -494,6 +522,70 @@ impl<S: Scene> App<S> {
             self.line_strips.push(start..end);
             let (min, max) = arc.bounds();
             rebuild_bbox(min, max, &mut self.vertices, &mut self.line_strips);
+        }
+
+        // Elliptic arcs, with the polyline checked against the curve.
+        let mut max_err = 0.0f32;
+        let mut ellipse_pts = 0;
+        for earc in &self.out_ellipses {
+            let start = self.vertices.len();
+            self.vertices
+                .extend(earc.adaptive_samples(self.tolerance).map(|p| Vertex {
+                    pos: p.into(),
+                    color: ELLIPSE_COLOR,
+                    arc_len: 0.0,
+                }));
+            let samples = &self.vertices[start..];
+            max_err = max_err.max(max_chord_error(earc, samples));
+            ellipse_pts += samples.len();
+            if self.show_samples {
+                self.points.extend(samples.iter().map(|v| PointInstance {
+                    center: v.pos,
+                    color: SAMPLE_COLOR,
+                }));
+            }
+            self.line_strips
+                .push(start as u32..self.vertices.len() as u32);
+            let (min, max) = earc.bounds();
+            rebuild_bbox(min, max, &mut self.vertices, &mut self.line_strips);
+        }
+
+        // Timing, with a reused buffer so allocation is not measured.
+        let mut buf = Vec::with_capacity(ellipse_pts.max(1));
+        let ellipse_ns = time_ns(|| {
+            for earc in &self.out_ellipses {
+                buf.clear();
+                buf.extend(std::hint::black_box(earc.adaptive_samples(self.tolerance)));
+            }
+        });
+        let mut arc_pts = 0;
+        for arc in &self.out_arcs {
+            arc_pts += arc.adaptive_samples(self.tolerance).count();
+        }
+        let mut buf = Vec::with_capacity(arc_pts.max(1));
+        let arc_ns = time_ns(|| {
+            for arc in &self.out_arcs {
+                buf.clear();
+                buf.extend(std::hint::black_box(arc.adaptive_samples(self.tolerance)));
+            }
+        });
+        self.stats = format!(
+            "tol {:.1e} | ellipses: {} pts, {:.1} ns/pt, max err {:.2e} ({:.3} tol) | arcs: {} pts, {:.1} ns/pt{}",
+            self.tolerance,
+            ellipse_pts,
+            ellipse_ns / ellipse_pts.max(1) as f64,
+            max_err,
+            max_err / self.tolerance,
+            arc_pts,
+            arc_ns / arc_pts.max(1) as f64,
+            if cfg!(debug_assertions) {
+                " | DEBUG BUILD, timings meaningless"
+            } else {
+                ""
+            },
+        );
+        if let Some(w) = &self.window {
+            w.set_title(&self.title());
         }
 
         // Input points (gizmo centers)
@@ -511,6 +603,18 @@ impl<S: Scene> App<S> {
                 color: POINT_COLOR,
             });
         }
+    }
+
+    fn title(&self) -> String {
+        format!("loke viewer | {}", self.stats)
+    }
+
+    /// Re-sample everything after a change that is not a point drag.
+    fn resample(&mut self) {
+        self.rebuild_geometry();
+        self.buffers_dirty = true;
+        println!("{}", self.stats);
+        self.request_redraw();
     }
 
     fn zoom_extents(&mut self) {
@@ -616,6 +720,7 @@ impl<S: Scene> App<S> {
             &self.inputs,
             &mut self.out_splines,
             &mut self.out_arcs,
+            &mut self.out_ellipses,
             &mut self.out_points,
         );
         self.rebuild_geometry();
@@ -699,6 +804,39 @@ fn rebuild_bbox(
 }
 
 // ---------- Helpers ----------
+
+/// Largest distance from the curve to the polyline through `samples`, probing
+/// `ERROR_PROBES` points per span. The samples are equally spaced in the parameter.
+fn max_chord_error(earc: &EllipticArc, samples: &[Vertex]) -> f32 {
+    let n = samples.len() - 1;
+    let mut worst = 0.0f32;
+    for (i, pair) in samples.windows(2).enumerate() {
+        let (a, b) = (Vec3::from(pair[0].pos), Vec3::from(pair[1].pos));
+        let ab = b - a;
+        let len_sq = ab.length_squared();
+        for j in 1..ERROR_PROBES {
+            let t = (i as f32 + j as f32 / ERROR_PROBES as f32) / n as f32;
+            let p = earc.point(t.min(1.0)).unwrap();
+            let s = if len_sq > 0.0 {
+                ((p - a).dot(ab) / len_sq).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            worst = worst.max((p - (a + ab * s)).length());
+        }
+    }
+    worst
+}
+
+/// Average wall time of one call of `f`, in nanoseconds.
+fn time_ns(mut f: impl FnMut()) -> f64 {
+    f(); // Warm up.
+    let start = std::time::Instant::now();
+    for _ in 0..TIMING_REPS {
+        f();
+    }
+    start.elapsed().as_nanos() as f64 / TIMING_REPS as f64
+}
 
 fn bounding_box(verts: &[Vertex], points: &[PointInstance]) -> (Vec3, Vec3) {
     let mut lo = Vec3::splat(f32::MAX);
@@ -838,7 +976,7 @@ impl<S: Scene> ApplicationHandler for App<S> {
         let window = event_loop
             .create_window(
                 Window::default_attributes()
-                    .with_title("loke viewer")
+                    .with_title(self.title())
                     .with_inner_size(winit::dpi::PhysicalSize::new(1200, 800)),
             )
             .unwrap();
@@ -1032,6 +1170,18 @@ impl<S: Scene> ApplicationHandler for App<S> {
                     }
                     PhysicalKey::Code(KeyCode::KeyZ | KeyCode::Home) if pressed => {
                         self.zoom_extents();
+                    }
+                    PhysicalKey::Code(KeyCode::BracketLeft) if pressed => {
+                        self.tolerance = (self.tolerance * 0.5).max(1e-7);
+                        self.resample();
+                    }
+                    PhysicalKey::Code(KeyCode::BracketRight) if pressed => {
+                        self.tolerance = (self.tolerance * 2.0).min(10.0);
+                        self.resample();
+                    }
+                    PhysicalKey::Code(KeyCode::KeyP) if pressed => {
+                        self.show_samples = !self.show_samples;
+                        self.resample();
                     }
                     _ => {}
                 }
@@ -1255,6 +1405,13 @@ impl Scene for CurveScene {
             Vec3::new(7.0, 0.0, 0.0), // axis-start
             Vec3::new(8.0, 0.0, 0.0), // axis-end
             Vec3::new(7.0, 3.0, 0.0), // arc-start
+            // Elliptic arc - center-start-end, drawn both ways round.
+            Vec3::new(-1.0, -5.0, 0.0), // center
+            Vec3::new(2.5, -4.6, 0.0),  // start
+            Vec3::new(-1.3, -3.4, 0.0), // end
+            // Elliptic arc - the three-point arc projected onto a tilted plane.
+            Vec3::new(-3.0, 0.0, -2.0), // plane point
+            Vec3::new(-2.2, 0.9, -1.1), // plane point + normal
         ])
     }
 
@@ -1262,6 +1419,7 @@ impl Scene for CurveScene {
         inputs: &[Vec3],
         splines: &mut Vec<Spline>,
         arcs: &mut Vec<Arc>,
+        ellipses: &mut Vec<EllipticArc>,
         points: &mut Vec<Vec3>,
     ) {
         // Splines.
@@ -1275,7 +1433,12 @@ impl Scene for CurveScene {
         splines.push(curve);
         // Arcs.
         arcs.clear();
+        ellipses.clear();
         if let Ok(arc) = Arc::from_three_points(inputs[5], inputs[6], inputs[7]) {
+            match EllipticArc::from_projected_arc(&arc, inputs[17], inputs[18] - inputs[17]) {
+                Ok(earc) => ellipses.push(earc),
+                Err(e) => eprintln!("Projected elliptic arc failed: {e:?}"),
+            }
             arcs.push(arc);
         }
         match Arc::from_start_tangent_end(inputs[8], inputs[9] - inputs[8], inputs[10]) {
@@ -1289,6 +1452,13 @@ impl Scene for CurveScene {
         ) {
             Ok(arc) => arcs.push(arc),
             Err(e) => eprintln!("Arc creation failed: {e:?}"),
+        }
+        // Elliptic arcs.
+        for flip in [false, true] {
+            match EllipticArc::from_center_start_end(inputs[14], inputs[15], inputs[16], flip) {
+                Ok(earc) => ellipses.push(earc),
+                Err(e) => eprintln!("Elliptic arc creation failed: {e:?}"),
+            }
         }
     }
 }
