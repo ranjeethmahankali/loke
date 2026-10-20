@@ -125,30 +125,36 @@
    accumulate span lengths, interpolate within spans), specialized for the ellipse.
 
    1. Walk the adaptive =φ= grid from the section above, using the same =tolerance=, rotation
-      recurrence and re-seeding.
-   2. Length of each span: integrate the speed =|−sin φ·U + cos φ·V|= over the span with 2-point
-      Gauss–Legendre. The two nodes are at fixed offsets from the span start, so their =(cos, sin)=
-      come from rotating by two pairs precomputed once. Cost: 2 =sqrt=s per span. The error shrinks
-      with the fifth power of the span size, which beats =Spline='s chord-plus-sagitta estimate at
-      the same cost.
-   3. Place the outputs. Starting at arc length =start= and stepping by =step=, for each target
-      distance find its span, interpolate =φ= linearly within the span by distance, and evaluate the
-      point with one =sin_cos=.  The resulting spacing error is about =tolerance=, matching
-      =Spline=.  Optional refinement: one Newton step per point using the speed at the interpolated
-      =φ= (its =sin_cos= is already computed).
-   4. Stop when the target distance passes the end of the arc. Like =Arc= and =Spline=, do not
-      force-emit the end point.
-   5. Tests:
-      - Distances between consecutive samples, measured along the curve, equal =step= to within
-        about =tolerance=. Measure the curve distance with =length()= of the sub-arc between the two
-        parameters (Carlson, exact), building the sub-arc in swept form as the existing tests do
-        with =swept_arc=.
-      - The first sample is at arc length =start= (and at =start()= when =start= is 0); the number
-        of samples is =floor((L − start)/step) + 1= with =L = length()=, allowing for a boundary
-        case at equality.
-      - For circular arcs, the samples match =Arc::uniform_samples= (which is exact) to within
-        =tolerance=.
-      - Thin and major arcs, and =start= larger than the length (no samples).
+      recurrence and re-seeding, with the step also capped at 1/16 rad.
+   2. Length of each span: Simpson's rule on the speed (start, middle, end), 2 =sqrt=s per span
+      since neighbouring spans share the end speed. Chord-based estimates like =Spline='s are
+      always short, so their errors add up along the arc (several =tol= on thin ellipses);
+      Simpson's errors cancel. 2-point Gauss–Legendre is as accurate, but its nodes are not at
+      the span ends, and the end speeds are needed for 3.
+   3. Place the outputs with a cubic Hermite inverse =φ(s)=: it matches =φ= and =dφ/ds = 1/v= at
+      both span ends, written as a cubic in the distance into the span. Linear interpolation is
+      off by about =tol=; this by a few thousandths of =tol= on moderate ellipses, and stays below
+      =tol= at A:B = 100:1. Slopes are clamped (Fritsch–Carlson) to keep it monotone and finite
+      where the speed is zero. For circles it is exact.
+   4. Evaluate each point without trig: =δ <= 1/16=, so short Taylor series for =sin δ= (to δ⁹)
+      and =cos δ= (to δ⁸) are exact to f64 rounding, then rotate the span's frame.
+   5. Speed: the next span's frame, length and speeds are set up one span ahead so their =sqrt=s
+      overlap with the current span's outputs; the Hermite coefficients are only computed for
+      spans an output lands in; one division gives 1/L and both 1/v.
+   6. Stop when the target distance passes the end of the arc. Like =Arc= and =Spline=, do not
+      force-emit the end point. Edge cases: =step <= 0= yields nothing, =start < 0= is clamped to
+      0, a degenerate sweep yields =start()= when =start= is 0 and nothing otherwise.
+   7. Tests:
+      - Distances between consecutive samples, measured along the curve with the exact Carlson
+        length of the sub-arc (recovering each sample's =φ= from a 2×2 solve), equal =step=
+        within 0.01 =tol= (0.2 at 10:1, 1.0 at 100:1), on tilted, thin, major, near-full-turn and
+        projected arcs, and the sample count is =floor((L − start)/step) + 1=.
+      - The span cap (huge =tol=) and the fallback (=tol <= 0=) stay accurate.
+      - The first sample is exactly =start()=, also for negative =start=.
+      - Circular arcs match =Arc::uniform_samples= to 1e-12 relative, including at the cap.
+      - A flat ellipse (zero speed at the start), edge cases, and f32 against f64.
+   8. Benches =elliptic_arc_uniform_samples_dense= (4 samples per span) and =_sparse= (one per 10
+      spans).
 
    Follow-up, separate task: =Arc::adaptive_samples= and =Arc::uniform_samples= call =sin= twice per
    point; the same rotation recurrence would speed them up.

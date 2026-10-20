@@ -242,6 +242,7 @@ const POINT_COLOR: [f32; 4] = [1.0, 0.4, 0.1, 1.0];
 const INPUT_POINT_COLOR: [f32; 4] = [0.8, 0.8, 0.75, 1.0];
 const ELLIPSE_COLOR: [f32; 4] = [0.3, 0.85, 0.95, 1.0];
 const SAMPLE_COLOR: [f32; 4] = [0.95, 0.85, 0.2, 1.0];
+const UNIFORM_COLOR: [f32; 4] = [0.3, 1.0, 0.45, 1.0];
 const PLANE_COLOR: [f32; 4] = [0.85, 0.45, 0.85, 0.6];
 const PLANE_HALF_SIZE: f32 = 2.5;
 
@@ -251,6 +252,8 @@ const DEFAULT_TOLERANCE: f32 = 0.001;
 const TIMING_REPS: u32 = 200;
 /// Curve points checked against the chord of every span when measuring the error.
 const ERROR_PROBES: usize = 16;
+/// Uniform samples drawn on the longest elliptic arc.
+const UNIFORM_COUNT: usize = 20;
 
 // ---------- Scene trait ----------
 
@@ -588,6 +591,37 @@ impl<S: Scene> App<S> {
             self.line_strips.push(start..self.vertices.len() as u32);
         }
 
+        // Uniform samples on the longest elliptic arc: the midpoints of UNIFORM_COUNT equal
+        // pieces of its length.
+        let longest = self
+            .out_ellipses
+            .iter()
+            .max_by(|a, b| a.length().total_cmp(&b.length()));
+        let (mut uniform_pts, mut uniform_ns) = (0, 0.0);
+        if let Some(earc) = longest {
+            let step = earc.length() / UNIFORM_COUNT as f32;
+            let tol = self.tolerance;
+            let start = self.points.len();
+            self.points
+                .extend(
+                    earc.uniform_samples(0.5 * step, step, tol)
+                        .map(|p| PointInstance {
+                            center: p.into(),
+                            color: UNIFORM_COLOR,
+                        }),
+                );
+            uniform_pts = self.points.len() - start;
+            let mut buf = Vec::with_capacity(uniform_pts.max(1));
+            uniform_ns = time_ns(|| {
+                buf.clear();
+                buf.extend(std::hint::black_box(earc.uniform_samples(
+                    0.5 * step,
+                    step,
+                    tol,
+                )));
+            });
+        }
+
         // Timing, with a reused buffer so allocation is not measured.
         let mut buf = Vec::with_capacity(ellipse_pts.max(1));
         let ellipse_ns = time_ns(|| {
@@ -608,12 +642,14 @@ impl<S: Scene> App<S> {
             }
         });
         self.stats = format!(
-            "tol {:.1e} | ellipses: {} pts, {:.1} ns/pt, max err {:.2e} ({:.3} tol) | arcs: {} pts, {:.1} ns/pt{}",
+            "tol {:.1e} | ellipses: {} pts, {:.1} ns/pt, max err {:.2e} ({:.3} tol) | uniform: {} pts, {:.0} ns | arcs: {} pts, {:.1} ns/pt{}",
             self.tolerance,
             ellipse_pts,
             ellipse_ns / ellipse_pts.max(1) as f64,
             max_err,
             max_err / self.tolerance,
+            uniform_pts,
+            uniform_ns,
             arc_pts,
             arc_ns / arc_pts.max(1) as f64,
             if cfg!(debug_assertions) {

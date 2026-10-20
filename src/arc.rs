@@ -724,6 +724,74 @@ Notation: c = center, S = start_vec, T = mid_vec, θ = angle, h = θ/2.
        about 1e-4 relative in f32 after 1000 points. Re-seeding (cos φ, sin φ) exactly
        with sin_cos(k Δ) every 32 steps keeps it below about 32 ε. The first and last points are
        `start()` and `end()`, not the recurrence.
+
+§9 Uniform sampling
+
+   There is no closed form from arc length back to φ, and inverting the Carlson length (§6)
+   per point is far too slow. Instead, walk the grid of §8 span by span, measure each span,
+   and place the outputs inside the span they fall in.
+
+   9.1 The local frame of a span.
+       On the span starting at φk, write φ = φk + δ with δ in [0, Δ], and let
+           Uk = P(φk) - c = cos φk U + sin φk V,     Vk = P'(φk) = -sin φk U + cos φk V.
+       The angle-addition formulas (as in 3.3) give
+           P(φk + δ) - c = cos δ Uk + sin δ Vk,     P'(φk + δ) = cos δ Vk - sin δ Uk.
+       (cos φk, sin φk) come from the rotation recurrence of 8.4 and 8.5.
+
+   9.2 Length of a span, with Simpson's rule on the speed v(δ) = |P'(φk + δ)|:
+           Lk = Δ/6 · (v(0) + 4 v(Δ/2) + v(Δ)).
+       v(Δ) is v(0) of the next span, so this costs 2 sqrts per span. The error of one span
+       is proportional to Δ⁵, and its sign changes along the arc, so the errors largely
+       cancel instead of building up. Chord-based estimates (as `Spline` uses) are always short of
+       the arc, so their errors add up along the arc: at A:B = 10:1, tol/A = 3e-4, the chord
+       plus sagitta estimate accumulates about 1.7 tol over the arc, Simpson about 1e-5 tol.
+
+   9.3 Placing a point inside a span.
+       For a target distance s in [0, Lk] from the span start, the inverse function δ(s) has
+           δ(0) = 0,   δ(Lk) = Δ,   dδ/ds = 1/v at both ends.
+       Interpolate it with a cubic Hermite polynomial in w = s/Lk:
+           δ = Δ · H(w),   H(w) = 3w² - 2w³ + m0 (w³ - 2w² + w) + m1 (w³ - w²),
+       where mi = (Lk/Δ)/vi is the ratio of the mean speed to the end speed. In terms of
+       the distance s itself, with g = Δ/Lk and ei = 1/vi (so mi = ei/g),
+           δ(s) = s (b1 + s (b2 + s b3)),   b1 = e0,   b2 = (3g - 2e0 - e1)/Lk,
+                                             b3 = (e0 + e1 - 2g)/Lk²,
+       which is 3 multiply-adds per point. These are only computed for spans that an output
+       lands in; spans that are skipped only need Lk. Linear
+       interpolation (mi = 1) is off by about tol in arc length; this is off by a few
+       thousandths of tol for moderate ellipses, and stays below tol at A:B = 100:1.
+       Each mi is clamped to at most 3, i.e. each end speed to at least Lk/(3Δ), which keeps
+       H monotone (Fritsch-Carlson), so δ stays in [0, Δ], and keeps it finite where v = 0
+       (a flat, degenerate ellipse).
+       For a circle the speed is constant, m0 = m1 = 1 and H(w) = w, so the placement is
+       exact.
+
+   9.4 Evaluation without trig.
+       Δ is capped at 1/16, so δ is in [0, 1/16]. The Taylor series of sin δ to δ⁹ and of
+       cos δ to δ⁸ are then accurate to δ^11/11! < 3e-21 and δ^10/10! < 3e-19, below f64
+       rounding. Then 9.1 gives the point with two multiply-adds per coordinate. The cap
+       only adds spans for coarse tolerances (at most 101 for a full turn); at typical
+       tolerances Δ is already smaller. A larger cap needs more terms, which adds latency
+       to every point, while the extra spans are only paid at coarse tolerances.
+
+   9.5 Bookkeeping.
+       The target distance is kept relative to the start of the current span, and Lk is
+       subtracted when moving to the next span, so it never grows large. With start = 0 the
+       first point has δ = 0 and is exactly `start()`. Iteration stops when the target is
+       past the last span; the end point is not forced, as for `Arc` and `Spline`.
+
+   9.6 Edge cases.
+       step <= 0 yields nothing (it would never advance). start < 0 is clamped to 0. A
+       degenerate sweep (sin h < ε) yields `start()` when start is 0, and nothing otherwise.
+
+   9.7 Keeping it fast.
+       sqrt and division share one slow execution unit, and the first output in a span
+       has to wait for that span's sqrts and division. So:
+         * The frame, length and end speeds of the next span are set up one span ahead,
+           so their sqrts overlap with the outputs of the current span.
+         * The Hermite coefficients are only computed for spans that an output lands in,
+           so skipped spans cost just the rotation and two sqrts.
+         * One division q = 1/(Lk v0 v1) gives 1/Lk = v0 v1 q, 1/v0 = Lk v1 q and
+           1/v1 = Lk v0 q.
 */
 
 impl<const DIM: usize, A: Adaptor<DIM>> EllipticArc<DIM, A> {
@@ -1038,6 +1106,44 @@ impl<const DIM: usize, A: Adaptor<DIM>> EllipticArc<DIM, A> {
         (A::vector(min), A::vector(max))
     }
 
+    /// The equal-step grid in φ of ELLIPSE ARC MATH §8.3, with the step also capped at
+    /// `max_step`. Returns `(V, n, Δ)`, with `n = 0` for a degenerate sweep.
+    fn sampling_grid(
+        &self,
+        tolerance: A::Scalar,
+        max_step: A::Scalar,
+    ) -> (A::Vector, usize, A::Scalar)
+    where
+        A: TrigonometryAdaptor,
+    {
+        let (zero, half, one) = (A::scalar(0.0), A::scalar(0.5), A::scalar(1.0));
+        let (sin_h, cos_h) = A::sin_cos(self.angle * half);
+        let u = self.start_vec;
+        if sin_h < A::epsilon() {
+            return (u, 0, zero);
+        }
+        let v = (self.mid_vec - u * cos_h) / sin_h;
+        let (a, b, d) = (
+            A::dot_product(u, u),
+            A::dot_product(v, v),
+            A::dot_product(u, v),
+        );
+        let diff = a - b;
+        let semi_major = A::sqrt((a + b + A::sqrt(diff * diff + A::scalar(4.0) * d * d)) * half);
+        let tol_step = if semi_major > A::epsilon() && tolerance > zero {
+            A::scalar(4.0) * A::asin(A::sqrt(half * A::min(tolerance / semi_major, one)))
+        } else {
+            zero
+        };
+        let tol_step = if tol_step > zero {
+            tol_step
+        } else {
+            A::scalar(0.1) // fallback, also when the step underflows
+        };
+        let n = A::to_usize(A::ceil(self.angle / A::min(tol_step, max_step))).max(1);
+        (v, n, self.angle / A::scalar(n as f64))
+    }
+
     /// Sample the arc so the polyline through the samples is within `tolerance` of the arc.
     /// The first and last samples are exactly [`Self::start`] and [`Self::end`].
     pub fn adaptive_samples(&self, tolerance: A::Scalar) -> impl Iterator<Item = A::Vector>
@@ -1045,34 +1151,11 @@ impl<const DIM: usize, A: Adaptor<DIM>> EllipticArc<DIM, A> {
         A: TrigonometryAdaptor,
     {
         // ELLIPSE ARC MATH §8.
-        let (zero, half, one) = (A::scalar(0.0), A::scalar(0.5), A::scalar(1.0));
-        let (sin_h, cos_h) = A::sin_cos(self.angle * half);
+        let (zero, one) = (A::scalar(0.0), A::scalar(1.0));
         let u = self.start_vec;
-        let (v, n, step) = if sin_h < A::epsilon() {
-            (u, 1, zero) // Degenerate: just the endpoints.
-        } else {
-            let v = (self.mid_vec - u * cos_h) / sin_h;
-            let (a, b, d) = (
-                A::dot_product(u, u),
-                A::dot_product(v, v),
-                A::dot_product(u, v),
-            );
-            let diff = a - b;
-            let semi_major =
-                A::sqrt((a + b + A::sqrt(diff * diff + A::scalar(4.0) * d * d)) * half);
-            let max_step = if semi_major > A::epsilon() && tolerance > zero {
-                // §8.3
-                A::scalar(4.0) * A::asin(A::sqrt(half * A::min(tolerance / semi_major, one)))
-            } else {
-                zero
-            };
-            let max_step = if max_step > zero {
-                max_step
-            } else {
-                A::scalar(0.1) // fallback, also when the step underflows
-            };
-            let n = A::to_usize(A::ceil(self.angle / max_step)).max(1);
-            (v, n, self.angle / A::scalar(n as f64))
+        let (v, n, step) = match self.sampling_grid(tolerance, A::scalar(PI)) {
+            (v, 0, _) => (v, 1, zero), // Degenerate: just the endpoints.
+            grid => grid,
         };
         let (sin_d, cos_d) = A::sin_cos(step);
         let (mut cos_p, mut sin_p) = (one, zero);
@@ -1095,6 +1178,125 @@ impl<const DIM: usize, A: Adaptor<DIM>> EllipticArc<DIM, A> {
             };
             k += 1;
             Some(pt)
+        })
+    }
+
+    /// Samples spaced `step` apart along the arc, starting at arc length `start`. `tolerance`
+    /// sizes the internal spans as in [`Self::adaptive_samples`]; the spacing error is a small
+    /// fraction of it. The end point is not forced.
+    pub fn uniform_samples(
+        &self,
+        start: A::Scalar,
+        step: A::Scalar,
+        tolerance: A::Scalar,
+    ) -> impl Iterator<Item = A::Vector>
+    where
+        A: TrigonometryAdaptor,
+    {
+        // ELLIPSE ARC MATH §9.
+        let (zero, half, one, three) = (
+            A::scalar(0.0),
+            A::scalar(0.5),
+            A::scalar(1.0),
+            A::scalar(3.0),
+        );
+        let u = self.start_vec;
+        let mut dist = A::max(start, zero);
+        let (v, n, delta) = if step > zero {
+            self.sampling_grid(tolerance, A::scalar(1.0 / 16.0)) // §9.4
+        } else {
+            (u, 0, zero) // §9.6
+        };
+        // §9.6: a degenerate sweep only has its start point.
+        let mut first = (step > zero && n == 0 && dist == zero).then(|| self.start());
+        let (sin_d, cos_d) = A::sin_cos(delta);
+        let (sin_m, cos_m) = A::sin_cos(delta * half);
+        let sixth = delta / A::scalar(6.0);
+        let inv_3delta = if n > 0 { one / (three * delta) } else { zero };
+        // The frame, length and end speeds of the span starting at φ = atan2(sin, cos), given
+        // the speed at its start (§9.1, §9.2).
+        let setup = move |cos_p: A::Scalar, sin_p: A::Scalar, s0: A::Scalar| {
+            let u0 = u * cos_p + v * sin_p;
+            let v0 = v * cos_p - u * sin_p;
+            let s_mid = A::vector_length(v0 * cos_m - u0 * sin_m);
+            let s1 = A::vector_length(v0 * cos_d - u0 * sin_d);
+            (u0, v0, sixth * (s0 + A::scalar(4.0) * s_mid + s1), s0, s1)
+        };
+        // The current span, and the next one, set up a span ahead so that its sqrts overlap
+        // with the outputs of the current one. A length of -1 means no span.
+        let (mut cos_p, mut sin_p) = (one, zero);
+        let mut cur = (u, v, -one, one, one);
+        let mut next = cur;
+        let mut spans_left = 0; // Spans after `cur`.
+        let mut set_up = 0; // Spans set up so far.
+        for _ in 0..n.min(2) {
+            if set_up == 0 {
+                next = setup(one, zero, A::vector_length(v)); // Exact at φ = 0.
+                cur = next;
+            } else {
+                (sin_p, cos_p) = (sin_p * cos_d + cos_p * sin_d, cos_p * cos_d - sin_p * sin_d);
+                next = setup(cos_p, sin_p, cur.4);
+                spans_left = 1;
+            }
+            set_up += 1;
+        }
+        // δ(s) = s (b1 + s (b2 + s b3)) on the current span, computed once an output lands in
+        // it (§9.3). Spans that are only skipped need just their length.
+        let (mut b1, mut b2, mut b3) = (zero, zero, zero);
+        let mut ready = false;
+        std::iter::from_fn(move || {
+            if first.is_some() {
+                return first.take();
+            }
+            while dist > cur.2 {
+                if spans_left == 0 {
+                    return None;
+                }
+                dist -= cur.2;
+                cur = next;
+                spans_left -= 1;
+                ready = false;
+                if set_up < n {
+                    (sin_p, cos_p) = if set_up % 32 == 0 {
+                        A::sin_cos(A::scalar(set_up as f64) * delta) // §8.5
+                    } else {
+                        (sin_p * cos_d + cos_p * sin_d, cos_p * cos_d - sin_p * sin_d)
+                    };
+                    next = setup(cos_p, sin_p, next.4);
+                    set_up += 1;
+                    spans_left += 1;
+                }
+            }
+            let (u0, v0, len, s0, s1) = cur;
+            if !ready {
+                // §9.3: the Hermite form in distance, with the end speeds clamped to at least
+                // L/(3Δ). One division gives 1/L, 1/v0 and 1/v1 (§9.7).
+                let floor = len * inv_3delta;
+                let (s0, s1) = (A::max(s0, floor), A::max(s1, floor));
+                let q = len * s0 * s1;
+                let q = if q > zero { one / q } else { zero };
+                let inv_len = s0 * s1 * q;
+                let g = delta * inv_len;
+                let (e0, e1) = (len * s1 * q, len * s0 * q);
+                b1 = e0;
+                b2 = (three * g - A::scalar(2.0) * e0 - e1) * inv_len;
+                b3 = (e0 + e1 - A::scalar(2.0) * g) * inv_len * inv_len;
+                ready = true;
+            }
+            let d = dist * (b1 + dist * (b2 + dist * b3));
+            // §9.4
+            let d2 = d * d;
+            let sin_d = d
+                * (one
+                    + d2 * (A::scalar(-1.0 / 6.0)
+                        + d2 * (A::scalar(1.0 / 120.0)
+                            + d2 * (A::scalar(-1.0 / 5040.0) + d2 * A::scalar(1.0 / 362880.0)))));
+            let cos_d = one
+                + d2 * (A::scalar(-0.5)
+                    + d2 * (A::scalar(1.0 / 24.0)
+                        + d2 * (A::scalar(-1.0 / 720.0) + d2 * A::scalar(1.0 / 40320.0))));
+            dist += step;
+            Some(self.center + u0 * cos_d + v0 * sin_d)
         })
     }
 
@@ -4493,6 +4695,254 @@ mod test {
         let expected = 2 * (arc.angle() as f64 / (2.0 * step)).ceil() as usize + 1;
         let count = arc.adaptive_samples(tol).count();
         assert!(count.abs_diff(expected) <= 2, "{count} vs {expected}");
+    }
+
+    // ===================== EllipticArc::uniform_samples =====================
+
+    /// `V` of ELLIPSE ARC MATH §2.
+    fn swept_v(earc: &EllipticArc3d) -> DVec3 {
+        let (s, c) = (earc.angle / 2.0).sin_cos();
+        (earc.mid_vec - earc.start_vec * c) / s
+    }
+
+    /// The parameter angle of a point on the arc, unwrapped to be near `near`.
+    fn param_of(earc: &EllipticArc3d, p: DVec3, near: f64) -> f64 {
+        // Solve [a d; d b] (cos φ, sin φ) = (U·(P - c), V·(P - c)).
+        let (u, v) = (earc.start_vec, swept_v(earc));
+        let (a, b, d) = (u.dot(u), v.dot(v), u.dot(v));
+        let (pu, pv) = (u.dot(p - earc.center), v.dot(p - earc.center));
+        let det = a * b - d * d;
+        let phi = ((a * pv - d * pu) / det).atan2((b * pu - d * pv) / det);
+        phi + TAU * ((near - phi) / TAU).round()
+    }
+
+    /// Exact (Carlson) length of the sub-arc between two parameter angles.
+    fn sub_length(earc: &EllipticArc3d, phi0: f64, phi1: f64) -> f64 {
+        if phi1 <= phi0 {
+            return 0.0;
+        }
+        let (u, v) = (earc.start_vec, swept_v(earc));
+        let (s, c) = phi0.sin_cos();
+        swept_arc(earc.center, u * c + v * s, v * c - u * s, phi1 - phi0).length()
+    }
+
+    /// Worst error of the arc-length positions of the samples: the first is at `start`, and
+    /// consecutive ones are `step` apart along the curve. Also checks the sample count.
+    fn uniform_error(earc: &EllipticArc3d, start: f64, step: f64, tol: f64, label: &str) -> f64 {
+        let samples: Vec<DVec3> = earc.uniform_samples(start, step, tol).collect();
+        let len = earc.length();
+        let expected = ((len - start) / step).floor() as usize + 1;
+        assert_eq!(samples.len(), expected, "{label}: len {len}");
+        let mut phi = param_of(earc, samples[0], 0.0);
+        let mut worst = (sub_length(earc, 0.0, phi) - start).abs();
+        for p in &samples[1..] {
+            let next = param_of(earc, *p, phi);
+            worst = worst.max((sub_length(earc, phi, next) - step).abs());
+            phi = next;
+        }
+        worst
+    }
+
+    /// Arcs and their bound on the spacing error, in units of the tolerance.
+    fn uniform_cases() -> Vec<(EllipticArc3d, f64, &'static str)> {
+        let c = DVec([0.7, -1.3, 2.1]);
+        let tilted = |theta| swept_arc(c, DVec([2.3, 0.4, -0.6]), DVec([-0.9, 1.7, 0.8]), theta);
+        let thin = |ratio: f64, theta| {
+            swept_arc(
+                c,
+                DVec([3.1, 0.0, 0.0]),
+                DVec([0.0, 3.1 / ratio, 0.0]),
+                theta,
+            )
+        };
+        let near_full = EllipticArc3d::from_center_start_end(
+            c,
+            c + DVec([2.6, 0.3, -0.2]),
+            c + DVec([2.1, 1.2, 0.4]),
+            true,
+        )
+        .unwrap();
+        let major = Arc3d::from_three_points(
+            DVec([1.0, 0.0, 0.0]),
+            DVec([0.0, -1.0, 0.0]),
+            DVec([0.0, 1.0, 0.0]),
+        )
+        .unwrap();
+        let projected = EllipticArc3d::from_projected_arc(
+            &major,
+            DVec([0.0, 0.0, 0.3]),
+            DVec([0.4, -0.7, 1.1]).normalize(),
+        )
+        .unwrap();
+        vec![
+            (tilted(1.37), 0.01, "tilted minor"),
+            (tilted(4.61), 0.01, "tilted major"),
+            (thin(2.0, 2.93), 0.01, "thin 2:1"),
+            (thin(10.0, 5.17), 0.2, "thin 10:1"),
+            (thin(100.0, 3.83), 1.0, "thin 100:1"),
+            (near_full, 0.01, "near full turn"),
+            (projected, 0.01, "projected major"),
+        ]
+    }
+
+    #[test]
+    fn t_elliptic_uniform_samples_spacing() {
+        for (earc, bound, label) in uniform_cases() {
+            let len = earc.length();
+            for tol in [0.0137, 0.00211] {
+                for (start, step) in [(0.0, len / 37.3), (0.0173 * len, len / 211.7)] {
+                    let err = uniform_error(&earc, start, step, tol, label) / tol;
+                    assert!(
+                        err <= bound,
+                        "{label}, tol={tol}, step={step}: {err} tol > {bound} tol"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn t_elliptic_uniform_samples_coarse_and_fallback() {
+        // A huge tolerance hits the 1/4 rad span cap, and tolerance <= 0 the 0.1 rad
+        // fallback. The spacing stays well within 0.1% of the length either way.
+        for (earc, _, label) in uniform_cases() {
+            let len = earc.length();
+            for tol in [0.0, -1.0, 7.3] {
+                let err = uniform_error(&earc, 0.0, len / 23.9, tol, label);
+                assert!(err <= 1e-3 * len, "{label}, tol={tol}: {err}");
+            }
+        }
+    }
+
+    #[test]
+    fn t_elliptic_uniform_samples_first_point() {
+        for (earc, _, label) in uniform_cases() {
+            let first = earc.uniform_samples(0.0, 0.0371, 0.0029).next().unwrap();
+            assert_eq!(first, earc.start(), "{label}");
+            // A negative start is clamped to 0.
+            let clamped = earc.uniform_samples(-0.83, 0.0371, 0.0029).next().unwrap();
+            assert_eq!(clamped, earc.start(), "{label}");
+        }
+    }
+
+    #[test]
+    fn t_elliptic_uniform_samples_matches_circular_arc() {
+        // Constant speed: Simpson and the Hermite placement are exact (ELLIPSE ARC MATH 9.3),
+        // so the samples match `Arc`'s exact ones to rounding, for any span size.
+        let arcs = [
+            Arc3d::from_three_points(
+                DVec([3.2, 0.0, 0.0]),
+                DVec([0.0, 3.2, 0.0]),
+                DVec([-3.2, 0.0, 0.0]),
+            ),
+            Arc3d::from_three_points(
+                DVec([1.3, 0.4, -0.2]),
+                DVec([0.1, 1.7, 0.9]),
+                DVec([-1.1, -0.3, 0.6]),
+            ),
+            Arc3d::from_three_points(
+                DVec([1.0, 0.0, 0.0]),
+                DVec([0.0, -1.0, 0.0]),
+                DVec([0.0, 1.0, 0.0]),
+            ),
+        ];
+        for (i, arc) in arcs.into_iter().enumerate() {
+            let arc = arc.unwrap();
+            let earc = EllipticArc3d::from(&arc);
+            for (start, step, tol) in [
+                (0.0, 0.137, 0.0071),
+                (0.29, 0.0213, 0.00013),
+                (0.0, 0.41, 3.9),
+            ] {
+                let expected: Vec<_> = arc.uniform_samples(start, step, tol).collect();
+                let actual: Vec<_> = earc.uniform_samples(start, step, tol).collect();
+                assert_eq!(actual.len(), expected.len(), "{i}");
+                for (a, e) in actual.iter().zip(&expected) {
+                    let err = (*a - *e).length();
+                    assert!(err < 1e-12 * arc.radius(), "{i}, tol={tol}: {err}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn t_elliptic_uniform_samples_edge_cases() {
+        let c = DVec([1.1, 0.0, -0.7]);
+        let earc = swept_arc(c, DVec([2.3, 0.0, 0.0]), DVec([0.0, 0.9, 0.4]), 4.27);
+        let len = earc.length();
+        // step <= 0 would never advance: nothing.
+        assert_eq!(earc.uniform_samples(0.0, 0.0, 0.01).count(), 0);
+        assert_eq!(earc.uniform_samples(0.0, -0.3, 0.01).count(), 0);
+        // Starting past the end: nothing.
+        assert_eq!(earc.uniform_samples(len * 1.0001, 0.1, 0.01).count(), 0);
+        // A step longer than the arc: just the first point.
+        assert_eq!(earc.uniform_samples(0.0, len * 1.3, 0.01).count(), 1);
+        // Degenerate sweep: the start point when start is 0, else nothing.
+        let empty = swept_arc(c, DVec([2.3, 0.0, 0.0]), DVec([0.0, 0.9, 0.0]), 0.0);
+        let samples: Vec<_> = empty.uniform_samples(0.0, 0.1, 0.01).collect();
+        assert_eq!(samples, vec![empty.start()]);
+        assert_eq!(empty.uniform_samples(0.2, 0.1, 0.01).count(), 0);
+        assert_eq!(empty.uniform_samples(0.0, 0.0, 0.01).count(), 0);
+    }
+
+    #[test]
+    fn t_elliptic_uniform_samples_flat() {
+        // V = 0: a segment traversed from x = 5 toward x = 5 cos 3, with zero speed at the
+        // start (the clamp in ELLIPSE ARC MATH 9.3). The arc length is s = 5 - x.
+        let earc = swept_arc(
+            DVec([0.0, 0.0, 0.0]),
+            DVec([5.0, 0.0, 0.0]),
+            DVec([0.0, 0.0, 0.0]),
+            3.0,
+        );
+        // The step is short enough that several samples land in the first span (about 0.01
+        // long at the 1/16 rad cap), where the speed starts at zero.
+        let step = 0.00173;
+        let samples: Vec<_> = earc.uniform_samples(0.0, step, 0.3).collect();
+        assert_eq!(samples.len(), (earc.length() / step).floor() as usize + 1);
+        let mut worst = 0.0f64;
+        for (k, p) in samples.iter().enumerate() {
+            assert!(p.0[1] == 0.0 && p.0[2] == 0.0, "{k}: {p:?}");
+            worst = worst.max((p.0[0] - (5.0 - k as f64 * step)).abs());
+        }
+        // Near the turning point δ grows like sqrt(s), which a cubic only approximates.
+        // Without the clamp this is about 0.03 tol.
+        assert!(worst < 0.01 * 0.3, "worst {worst}");
+    }
+
+    #[test]
+    fn t_elliptic_uniform_samples_f32() {
+        // Same arc in single precision, compared with the f64 samples of the same stored
+        // vectors: no drift over many spans and samples.
+        let (c, u, v, theta) = ([0.3, -0.8, 1.2], [2.9, 0.7, -0.4], [-0.6, 1.3, 0.5], 5.37);
+        let at = |phi: f64| DVec(std::array::from_fn(|i| u[i] * phi.cos() + v[i] * phi.sin()));
+        let narrow = |v: DVec3| crate::Vec::<3>([v.0[0] as f32, v.0[1] as f32, v.0[2] as f32]);
+        let earc = EllipticArc3f {
+            center: narrow(DVec(c)),
+            start_vec: narrow(at(0.0)),
+            mid_vec: narrow(at(theta / 2.0)),
+            end_vec: narrow(at(theta)),
+            angle: theta as f32,
+        };
+        let wide = |v: crate::Vec<3>| DVec(v.0.map(f64::from));
+        let reference = EllipticArc3d {
+            center: wide(earc.center),
+            start_vec: wide(earc.start_vec),
+            mid_vec: wide(earc.mid_vec),
+            end_vec: wide(earc.end_vec),
+            angle: earc.angle as f64,
+        };
+        let step = reference.length() / 2017.3;
+        let actual: Vec<_> = earc.uniform_samples(0.0, step as f32, 1e-5).collect();
+        let expected: Vec<_> = reference.uniform_samples(0.0, step, 1e-5).collect();
+        assert_eq!(actual.len(), expected.len());
+        let scale = semi_major(&reference);
+        let worst = actual
+            .iter()
+            .zip(&expected)
+            .map(|(a, e)| (wide(*a) - *e).length())
+            .fold(0.0, f64::max);
+        assert!(worst < 1e-4 * scale, "worst {worst}");
     }
 
     // ===================== EllipticArc::point and tangent =====================

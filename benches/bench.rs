@@ -197,6 +197,31 @@ fn b_elliptic_arc_adaptive_samples(c: &mut Criterion) {
     });
 }
 
+fn b_elliptic_arc_uniform_samples(c: &mut Criterion) {
+    let earc = EllipticArc3d::from_center_start_end(
+        DVec([-3.0, 0.0, 0.0]), // center
+        DVec([-0.5, 0.3, 0.0]), // start
+        DVec([-3.2, 1.1, 0.0]), // end
+        false,
+    )
+    .unwrap();
+    let tol = 0.00001;
+    // Dense output has several samples per internal span, sparse output skips many spans.
+    let span = earc.length() / (earc.adaptive_samples(tol).count() - 1) as f64;
+    let mut buf = Vec::new();
+    for (label, step) in [
+        ("elliptic_arc_uniform_samples_dense", span / 4.0),
+        ("elliptic_arc_uniform_samples_sparse", span * 10.0),
+    ] {
+        c.bench_function(label, |b| {
+            b.iter(|| {
+                buf.clear();
+                buf.extend(black_box(earc.uniform_samples(0.0, step, tol)));
+            });
+        });
+    }
+}
+
 fn benchmarks(c: &mut Criterion) {
     b_root_finding::<4>(c, "degree_03_root_finding");
     b_root_finding::<5>(c, "degree_04_root_finding");
@@ -209,6 +234,7 @@ fn benchmarks(c: &mut Criterion) {
     b_spline_adaptive_samples(c);
     b_arc_adaptive_samples(c);
     b_elliptic_arc_adaptive_samples(c);
+    b_elliptic_arc_uniform_samples(c);
     b_spline_length(c);
     b_spline_bounds(c);
     b_spline_eval(c);
