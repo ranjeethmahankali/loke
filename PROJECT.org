@@ -68,6 +68,26 @@
 
    <2026-10-20 Tue 18:31> Doing this before the fma change, to get a baseline.
 
+* NEXT tn8bmt - Closest Point
+  :PROPERTIES:
+  :CREATED:  2026-08-22 Sat 08:51
+  :END:
+  :LOGBOOK:
+  - State "NEXT"       from "TODO"       [2026-10-20 Tue 19:23]
+  :END:
+
+  This could be a library feature. For maximum performance, splines would need to cache some
+  polynomials, and sample points. So maybe provide an 'projector' object that caches this stuff,
+  deals with all curve types, and projects points onto the curves.
+
+  Spline projection logic is dimension agnostic. Lines are trivial. Arcs are interesting.
+
+  I can write specialized logic for 2d and 3d arcs. I would need to look at the derivative
+  expression for the general dimension agnostic arc, and find all points where the dot product with
+  the query point and the tangent is zero. I wonder if I can generalize this. If I can, I should
+  compare the performance with the special case logic for 2d and 3d arcs. Maybe the generalization
+  is just as fast, and I don't need the specializations? Unlikely in 2d, unsure in 3d, very
+  interesting to try.
 * TODO Implement Polycurves
   :PROPERTIES:
   :CREATED:  2026-06-06 Sat 16:36
@@ -112,21 +132,3 @@
   rigid, try to transform an arc, and if the error is bigger than epsilon during arc creation,
   fallback to ellipse? Actually that last idea sounds good. It would preserve arcs that happen to
   get projected on to a parallel plane, and only convert arcs to ellipses when there is a need.
-
-* TODO Closest Point
-  :PROPERTIES:
-  :CREATED:  2026-08-22 Sat 08:51
-  :END:
-
-  This could be a library feature. For maximum performance, splines would need to cache some
-  polynomials, and sample points. So maybe provide an 'projector' object that caches this stuff,
-  deals with all curve types, and projects points onto the curves.
-
-  Spline projection logic is dimension agnostic. Lines are trivial. Arcs are interesting.
-
-  I can write specialized logic for 2d and 3d arcs. I would need to look at the derivative
-  expression for the general dimension agnostic arc, and find all points where the dot product with
-  the query point and the tangent is zero. I wonder if I can generalize this. If I can, I should
-  compare the performance with the special case logic for 2d and 3d arcs. Maybe the generalization
-  is just as fast, and I don't need the specializations? Unlikely in 2d, unsure in 3d, very
-  interesting to try.
