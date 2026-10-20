@@ -21,6 +21,9 @@
   - Elliptic arc: 0 to 1.
   - Spline: unchanged for now.
 
+  <2026-10-20 Tue 18:24> Changed the parameterization. Realized spline curvature is wrong, it is
+  just returning the second derivative w.r.t the parameter. Fixing that now.
+
 * TODO Implement Polycurves
   :PROPERTIES:
   :CREATED:  2026-06-06 Sat 16:36
@@ -83,4 +86,3 @@
   compare the performance with the special case logic for 2d and 3d arcs. Maybe the generalization
   is just as fast, and I don't need the specializations? Unlikely in 2d, unsure in 3d, very
   interesting to try.
-
