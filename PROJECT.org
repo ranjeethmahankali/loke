@@ -2,11 +2,13 @@
 #+author: Ranjeeth Mahankali
 #+filetags: :project:loke:
 
-* NEXT tgahg8 - Support Elliptic Arcs
+* DONE tgahg8 - Support Elliptic Arcs
+  CLOSED: [2026-10-20 Tue 13:22]
   :PROPERTIES:
   :CREATED:  2026-06-06 Sat 16:40
   :END:
   :LOGBOOK:
+  - State "DONE"       from "NEXT"       [2026-10-20 Tue 13:22]
   - State "NEXT"       from "TODO"       [2026-06-06 Sat 16:48]
   :END:
 
@@ -25,10 +27,13 @@
   <2026-06-12 Fri 10:11> Addeed simple functions to create elliptic arcs and
   tests for them. Now starting to expand the API.
 
-** TODO Implement adaptive and uniform sampling for elliptic arcs
-   :PROPERTIES:
-   :CREATED:  2026-06-12 Fri 10:29
-   :END:
+* NEXT tn7uye - Implement adaptive and uniform sampling for elliptic arcs
+  :PROPERTIES:
+  :CREATED:  2026-06-12 Fri 10:29
+  :END:
+  :LOGBOOK:
+  - State "NEXT"       from "TODO"       [2026-10-20 Tue 13:22]
+  :END:
 
 * TODO Change the domains of Arc and LineSegment
   :PROPERTIES:
