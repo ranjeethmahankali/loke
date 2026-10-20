@@ -2,11 +2,13 @@
 #+author: Ranjeeth Mahankali
 #+filetags: :project:loke:
 
-* NEXT tn88ea - Change the domains of Arc and LineSegment
+* DONE tn88ea - Change the domains of Arc and LineSegment
+  CLOSED: [2026-10-20 Tue 18:26]
   :PROPERTIES:
   :CREATED:  2026-06-12 Fri 10:12
   :END:
   :LOGBOOK:
+  - State "DONE"       from "NEXT"       [2026-10-20 Tue 18:26]
   - State "NEXT"       from "TODO"       [2026-10-20 Tue 18:13]
   :END:
 
