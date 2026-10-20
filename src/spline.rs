@@ -1112,7 +1112,6 @@ fn calc_ders_basis<A: ScalarAdaptor>(
 
 #[cfg(test)]
 mod test {
-    use std::f64::consts::{E, FRAC_1_PI, LN_2, LOG2_E, PI, SQRT_2, TAU};
 
     use super::*;
     use crate::{DVec, DVec3, polynomial};
@@ -2603,13 +2602,13 @@ mod test {
     #[test]
     fn t_clamped_endpoints_match_control_points() {
         let control_points = [
-            vec3(0.7123, PI, -2.8081),
-            vec3(-SQRT_2, 0.5772, TAU),
-            vec3(E, -LN_2, LOG2_E),
-            vec3(-3.3691, 4.6692, -FRAC_1_PI),
-            vec3(0.1103, -2.5029, 5.7722),
-            vec3(8.3144, 1.6180, -4.1888),
-            vec3(-0.9033, 7.3891, 0.6137),
+            vec3(-3.171, -6.2847, 2.3514),
+            vec3(-7.6961, 0.6459, -2.4176),
+            vec3(-7.956, 0.1338, -8.3251),
+            vec3(-1.1944, -7.7426, -7.3672),
+            vec3(-1.3587, 5.8833, -6.7716),
+            vec3(-4.9817, 2.2938, 8.0588),
+            vec3(1.3879, -1.8598, 8.5726),
         ];
         for degree in 1..=6 {
             let pts = &control_points[..degree + 1];
@@ -2688,7 +2687,7 @@ mod test {
         1.0 / 3.0,
         0.5,
         1.0,
-        std::f64::consts::PI,
+        6.4127,
         7.0,
         100.0,
         1e6,

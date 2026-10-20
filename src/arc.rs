@@ -3,7 +3,6 @@ use crate::{
     error::Error,
     vec::{F32Adaptor, F64Adaptor},
 };
-use core::f64;
 use std::f64::consts::{FRAC_1_SQRT_2, FRAC_PI_2, PI, TAU};
 
 pub type Arc2d = Arc<2, F64Adaptor>;
@@ -3520,8 +3519,8 @@ mod test {
         earc: &EllipticArc<DIM, F64Adaptor>,
         n: usize,
     ) -> ([f64; DIM], [f64; DIM]) {
-        let mut min = [<f64>::INFINITY; DIM];
-        let mut max = [<f64>::NEG_INFINITY; DIM];
+        let mut min = [f64::INFINITY; DIM];
+        let mut max = [f64::NEG_INFINITY; DIM];
         for i in 0..=n {
             let p = earc.point(i as f64 / n as f64).unwrap();
             for k in 0..DIM {
@@ -3873,7 +3872,7 @@ mod test {
     #[test]
     fn t_elliptic_length_f32() {
         // Same arc in single precision: the Carlson loops must terminate and agree with f64.
-        let at = |phi: f64| (DVec([phi.cos() + phi.sin(), 0.4 * phi.sin(), 0.0]));
+        let at = |phi: f64| DVec([phi.cos() + phi.sin(), 0.4 * phi.sin(), 0.0]);
         let theta = 4.0;
         let wide = swept_arc(
             DVec([0.0, 0.0, 0.0]),

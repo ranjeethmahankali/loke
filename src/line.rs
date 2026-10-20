@@ -180,7 +180,9 @@ impl<const DIM: usize, A: Adaptor<DIM>> Default for LineSeg<DIM, A> {
     fn default() -> Self {
         LineSeg {
             from: A::zero_vector(),
-            to: A::vector(std::array::from_fn(|i| A::scalar(if i == 0 { 1.0 } else { 0.0 }))),
+            to: A::vector(std::array::from_fn(|i| {
+                A::scalar(if i == 0 { 1.0 } else { 0.0 })
+            })),
         }
     }
 }
