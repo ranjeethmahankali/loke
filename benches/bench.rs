@@ -95,9 +95,9 @@ fn b_spline_adaptive_samples(c: &mut Criterion) {
     let spline = make_spline();
     let mut buf = Vec::new();
     c.bench_function("degree_03_spline_adaptive_samples", |b| {
-        buf.clear();
         b.iter(|| {
-            buf.extend(black_box(spline.adaptive_samples(0.00001)));
+            buf.clear();
+            buf.extend(black_box(black_box(&spline).adaptive_samples(0.00001)));
         });
     });
 }
@@ -107,7 +107,7 @@ fn b_spline_length(c: &mut Criterion) {
     c.bench_function("degree_03_spline_length", |b| {
         let mut lsum = 0.0_f64;
         b.iter(|| {
-            lsum += black_box(spline.length(1e-5));
+            lsum += black_box(black_box(&spline).length(1e-5));
         });
     });
 }
@@ -117,7 +117,7 @@ fn b_spline_bounds(c: &mut Criterion) {
     c.bench_function("degree_03_spline_bounds", |b| {
         let mut bounds = (DVec([0.0; 3]), DVec([0.0; 3]));
         b.iter(|| {
-            bounds = black_box(spline.bounds());
+            bounds = black_box(black_box(&spline).bounds());
         });
     });
 }
@@ -136,7 +136,7 @@ fn b_spline_eval(c: &mut Criterion) {
         let mut psum = DVec([0.0; 3]);
         b.iter(|| {
             for t in params.iter() {
-                psum += black_box(spline.point(*t).unwrap());
+                psum += black_box(black_box(&spline).point(*t).unwrap());
             }
         });
     });
@@ -156,7 +156,7 @@ fn b_spline_eval_with_deriv(c: &mut Criterion) {
         let mut results = [DVec([0.0; 3]); 3];
         b.iter(|| {
             for t in params.iter() {
-                spline
+                black_box(&spline)
                     .point_with_derivs(*t, black_box(&mut results))
                     .unwrap();
             }
@@ -173,9 +173,9 @@ fn b_arc_adaptive_samples(c: &mut Criterion) {
     .unwrap();
     let mut buf = Vec::new();
     c.bench_function("arc_adaptive_samples", |b| {
-        buf.clear();
         b.iter(|| {
-            buf.extend(black_box(arc.adaptive_samples(0.00001)));
+            buf.clear();
+            buf.extend(black_box(black_box(&arc).adaptive_samples(0.00001)));
         });
     });
 }
@@ -190,9 +190,9 @@ fn b_elliptic_arc_adaptive_samples(c: &mut Criterion) {
     .unwrap();
     let mut buf = Vec::new();
     c.bench_function("elliptic_arc_adaptive_samples", |b| {
-        buf.clear();
         b.iter(|| {
-            buf.extend(black_box(earc.adaptive_samples(0.00001)));
+            buf.clear();
+            buf.extend(black_box(black_box(&earc).adaptive_samples(0.00001)));
         });
     });
 }
@@ -216,7 +216,7 @@ fn b_elliptic_arc_uniform_samples(c: &mut Criterion) {
         c.bench_function(label, |b| {
             b.iter(|| {
                 buf.clear();
-                buf.extend(black_box(earc.uniform_samples(0.0, step, tol)));
+                buf.extend(black_box(black_box(&earc).uniform_samples(0.0, step, tol)));
             });
         });
     }
