@@ -129,7 +129,7 @@
     results was 1e-10. Near a full turn (θ > 2π - 1e-4) the error is ~5e-11, which comes
     from =point()= itself (it divides by sin(θ/2)), not from the projection.
 
-** TODO Think about alternative ways to find closest points
+** TODO Performance Improvements
    :PROPERTIES:
    :CREATED:  2026-10-21 Wed 09:49
    :END:
@@ -137,6 +137,22 @@
    There is newer research, such as: [[id:fe40e404-a625-4775-8825-ec57932635a2][P2M: Closest Point On Mesh Algo]], that can help write even
    faster, bulk query friendly, SIMD friendly algorithms, that are very different (rewrite) from
    what we have today.
+
+*** TODO Ideas to Explore
+    :PROPERTIES:
+    :CREATED:  2026-10-21 Wed 10:04
+    :END:
+
+    1. Replace the root finder only. Keep the current pruning, but solve spline spans and
+       elliptic arcs with Newton started from the nearest of K precomputed samples per span.
+       This isolates the cost of root finding (63-85% of spline and ellipse time). Check
+       accuracy against the current exact projector.
+    2. A grid (or octree) over query space, with a conservative candidate list per cell: the
+       pieces whose min distance to the cell is at most the smallest max distance of any
+       piece. Group queries by cell, and run SIMD across the queries that share a piece.
+       Benchmark with P2M's protocol (1M random queries in 10x the bounding box) and a
+       coherent voxel grid. Track build time and memory.
+    3. Threads, and runtime dispatch for AVX2 and AVX-512.
 
 * TODO Implement Polycurves
   :PROPERTIES:
