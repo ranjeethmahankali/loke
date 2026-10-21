@@ -23,6 +23,10 @@ code is dimension agnostic by design.
 - Keep code terse. Inline small computations; don't add helpers for two-line calculations.
 - Math derivations live in comment blocks (e.g. `ELLIPSE ARC MATH` in `src/arc.rs`), split into
   numbered sections. Code refers to them with short comments like `// ELLIPSE ARC MATH §8.2.`
+- The public API never panics on bad input: return an `Error` instead. Reuse existing variants
+  where they fit (e.g. `InvalidArgument` for slice length mismatches), and add one only when
+  none does. Internal invariants may still use
+  `expect("INTERNAL ERROR: ...")`.
 - No heap allocation in hot paths. Sample iterators are built with `std::iter::from_fn`.
 - Emit curve end points exactly from `start()` and `end()`, never from a recurrence.
 - No 2D or 3D special cases unless a measurement shows they pay off.

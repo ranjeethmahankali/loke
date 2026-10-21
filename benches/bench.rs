@@ -1,4 +1,4 @@
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
 use loke::{
     Arc3d, DVec, EllipticArc3d, F64Adaptor, LineSeg3d, Projector, Spline3d, polynomial_roots,
 };
@@ -265,6 +265,60 @@ fn b_closest_point(
     });
 }
 
+/// 1M random queries in the bounding box of the curve scaled 10x about its center, as in P2M.
+fn bulk_random_queries((lo, hi): (DVec<3>, DVec<3>)) -> Vec<DVec<3>> {
+    let mut rng = SmallRng::seed_from_u64(SEED);
+    let (mid, half) = ((lo + hi) * 0.5, (hi - lo) * 5.0);
+    (0..1_000_000)
+        .map(|_| {
+            DVec(std::array::from_fn(|i| {
+                mid[i] + half[i] * rng.random_range(-1.0..1.0)
+            }))
+        })
+        .collect()
+}
+
+/// Centers of a 100x100x100 voxel grid over the bounding box of the curve grown by 1 on every
+/// side, in x-major order: neighbouring queries are close together.
+fn bulk_grid_queries((lo, hi): (DVec<3>, DVec<3>)) -> Vec<DVec<3>> {
+    const N: usize = 100;
+    let (lo, size) = (lo - DVec([1.0; 3]), hi - lo + DVec([2.0; 3]));
+    (0..N * N * N)
+        .map(|k| {
+            let idx = [k / (N * N), (k / N) % N, k % N];
+            DVec(std::array::from_fn(|i| {
+                lo[i] + size[i] * (idx[i] as f64 + 0.5) / N as f64
+            }))
+        })
+        .collect()
+}
+
+/// Benchmarks `closest_point_many` on 1M random queries and on a 1M voxel grid.
+fn b_closest_point_many(
+    c: &mut Criterion,
+    curve: &str,
+    proj: &Projector<3, F64Adaptor>,
+    bounds: (DVec<3>, DVec<3>),
+) {
+    let mut group = c.benchmark_group(format!("closest_point_many_{curve}"));
+    group.sample_size(10);
+    for (label, queries) in [
+        ("random", bulk_random_queries(bounds)),
+        ("grid", bulk_grid_queries(bounds)),
+    ] {
+        let mut points = vec![DVec([0.0; 3]); queries.len()];
+        group.throughput(Throughput::Elements(queries.len() as u64));
+        group.bench_function(label, |b| {
+            b.iter(|| {
+                proj.closest_point_many(black_box(&queries), &mut points)
+                    .unwrap();
+                black_box(&points);
+            });
+        });
+    }
+    group.finish();
+}
+
 fn b_closest_points(c: &mut Criterion) {
     let line = LineSeg3d::create(DVec([-1.0, 0.5, 0.0]), DVec([2.0, -1.0, 1.5]));
     b_closest_point(
@@ -273,6 +327,7 @@ fn b_closest_points(c: &mut Criterion) {
         &Projector::from_line(&line),
         &projection_queries(line.bounds()),
     );
+    b_closest_point_many(c, "line", &Projector::from_line(&line), line.bounds());
     let arc = Arc3d::from_three_points(
         DVec([-3.5, 0.0, 0.0]),
         DVec([-3.0, 1.5, 0.0]),
@@ -285,6 +340,7 @@ fn b_closest_points(c: &mut Criterion) {
         &Projector::from_arc(&arc),
         &projection_queries(arc.bounds()),
     );
+    b_closest_point_many(c, "arc", &Projector::from_arc(&arc), arc.bounds());
     let earc = EllipticArc3d::from_center_start_end(
         DVec([-3.0, 0.0, 0.0]),
         DVec([-0.5, 0.3, 0.0]),
@@ -297,6 +353,12 @@ fn b_closest_points(c: &mut Criterion) {
         "elliptic_arc",
         &Projector::from_elliptic_arc(&earc),
         &projection_queries(earc.bounds()),
+    );
+    b_closest_point_many(
+        c,
+        "elliptic_arc",
+        &Projector::from_elliptic_arc(&earc),
+        earc.bounds(),
     );
     // Degree 3, 33 control points: 30 knot spans.
     let mut rng = SmallRng::seed_from_u64(SEED);
@@ -315,6 +377,12 @@ fn b_closest_points(c: &mut Criterion) {
         "degree_03_spline_30_segments",
         &Projector::from_spline(&spline).unwrap(),
         &projection_queries(spline.bounds()),
+    );
+    b_closest_point_many(
+        c,
+        "degree_03_spline_30_segments",
+        &Projector::from_spline(&spline).unwrap(),
+        spline.bounds(),
     );
 }
 

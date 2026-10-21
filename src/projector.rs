@@ -396,6 +396,43 @@ impl<const DIM: usize, A: Adaptor<DIM> + TrigonometryAdaptor> Projector<DIM, A> 
         (best.point, best.param, best.segment)
     }
 
+    /// [`Self::closest_point`] for every query, written to `points` at the same index. Fails
+    /// with [`Error::InvalidArgument`] if `points` and `queries` differ in length.
+    pub fn closest_point_many(
+        &self,
+        queries: &[A::Vector],
+        points: &mut [A::Vector],
+    ) -> Result<(), Error> {
+        if points.len() != queries.len() {
+            return Err(Error::InvalidArgument);
+        }
+        for (p, q) in points.iter_mut().zip(queries) {
+            *p = self.closest::<false, false>(*q).point;
+        }
+        Ok(())
+    }
+
+    /// [`Self::closest_point_with_param`] for every query, written to `points`, `params` and
+    /// `segments` at the same index. Fails with [`Error::InvalidArgument`] if any of them
+    /// differs from `queries` in length.
+    pub fn closest_point_with_param_many(
+        &self,
+        queries: &[A::Vector],
+        points: &mut [A::Vector],
+        params: &mut [A::Scalar],
+        segments: &mut [usize],
+    ) -> Result<(), Error> {
+        let n = queries.len();
+        if points.len() != n || params.len() != n || segments.len() != n {
+            return Err(Error::InvalidArgument);
+        }
+        for (i, q) in queries.iter().enumerate() {
+            let best = self.closest::<true, false>(*q);
+            (points[i], params[i], segments[i]) = (best.point, best.param, best.segment);
+        }
+        Ok(())
+    }
+
     /// Shared by the public functions. Without `WANT_PARAM` the parameter code is dead, so
     /// [`Self::closest_point`] stays small enough for the compiler to inline it into the
     /// caller, which matters: see [`Self::closest_on_segment`].
@@ -1303,6 +1340,54 @@ mod test {
                 let sweep = rng.random_range(lo..hi);
                 let arc = rand_elliptic_arc(&mut rng, max_ratio, sweep);
                 check(&Projector::from_elliptic_arc(&arc), arc.center(), &mut rng);
+            }
+        }
+    }
+
+    /// The bulk functions match the single query ones exactly, and reject mismatched slices.
+    #[test]
+    fn t_many() {
+        let mut rng = StdRng::seed_from_u64(17);
+        let cps: std::vec::Vec<DVec<3>> = (0..9).map(|_| rand_vec::<3>(&mut rng, 3.0)).collect();
+        let spline = Spline::<3, F64Adaptor>::create_clamped(cps, 3).unwrap();
+        let earc = rand_elliptic_arc(&mut rng, 4.0, 2.3);
+        for proj in [
+            Projector::from_spline(&spline).unwrap(),
+            Projector::from_elliptic_arc(&earc),
+            Projector::from_arc(&rand_arc::<3>(&mut rng)),
+        ] {
+            let queries = rand_queries::<3>(&mut rng, 50);
+            let n = queries.len();
+            let mut points = vec![DVec([0.0; 3]); n];
+            let mut params = vec![0.0; n];
+            let mut segments = vec![0; n];
+            proj.closest_point_many(&queries, &mut points).unwrap();
+            for (q, p) in queries.iter().zip(&points) {
+                assert_eq!(*p, proj.closest_point(*q));
+            }
+            points.fill(DVec([0.0; 3]));
+            proj.closest_point_with_param_many(&queries, &mut points, &mut params, &mut segments)
+                .unwrap();
+            for (i, q) in queries.iter().enumerate() {
+                assert_eq!(
+                    (points[i], params[i], segments[i]),
+                    proj.closest_point_with_param(*q)
+                );
+            }
+            assert!(matches!(
+                proj.closest_point_many(&queries, &mut points[1..]),
+                Err(Error::InvalidArgument)
+            ));
+            for (a, b, c) in [(n - 1, n, n), (n, n - 1, n), (n, n, n - 1)] {
+                assert!(matches!(
+                    proj.closest_point_with_param_many(
+                        &queries,
+                        &mut points[..a],
+                        &mut params[..b],
+                        &mut segments[..c]
+                    ),
+                    Err(Error::InvalidArgument)
+                ));
             }
         }
     }

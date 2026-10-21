@@ -129,9 +129,12 @@
     results was 1e-10. Near a full turn (θ > 2π - 1e-4) the error is ~5e-11, which comes
     from =point()= itself (it divides by sin(θ/2)), not from the projection.
 
-** TODO Performance Improvements
+** NEXT Performance Improvements
    :PROPERTIES:
    :CREATED:  2026-10-21 Wed 09:49
+   :END:
+   :LOGBOOK:
+   - State "NEXT"       from "TODO"       [2026-10-21 Wed 14:23]
    :END:
 
    There is newer research, such as: [[id:fe40e404-a625-4775-8825-ec57932635a2][P2M: Closest Point On Mesh Algo]], that can help write even
@@ -174,11 +177,37 @@
        samples' local minima missed minima between samples, and checking the sign of g only at
        interval ends still missed 38 of 200k spline queries (up to 1.6% distance error), hence the
        balls and Bernstein bounds.  =t_matches_root_finder= keeps the root finder as the reference.
-    2. [ ] A grid (or octree) over query space, with a conservative candidate list per cell: the
-       pieces whose min distance to the cell is at most the smallest max distance of any
-       piece. Group queries by cell, and run SIMD across the queries that share a piece.
-       Benchmark with P2M's protocol (1M random queries in 10x the bounding box) and a
-       coherent voxel grid. Track build time and memory.
+
+    2. [ ] Bulk queries, and a BVH over the curve. In scalar code first; SIMD is 2b, last.
+       - [X] =closest_point_many= and =closest_point_with_param_many=: queries in a slice,
+         results in slices of the same length (separate slices for points, params and segment
+         indices), =Error::InvalidArgument= on a length mismatch. This is where query ordering,
+         SIMD and threads go later, without changing the API.
+       - [ ] A BVH (octree or kd tree) over the pieces: the sample intervals with their balls,
+         and lines and arcs whole. Nearest first traversal, pruned by the best distance so far,
+         so it prunes for queries anywhere in space, not just inside a grid. It replaces the
+         linear scan over segments, so single queries gain too. Track build time and memory.
+       - [ ] Sort the queries of a batch along a Morton curve (scratch from
+         =with_thread_local_buffers=), and seed each query's best distance from its neighbour's
+         closest point.
+       - [ ] Maybe later: P2M's interception table, as a cache of candidate lists per query
+         space cell on top of the tree, if the traversal dominates.
+
+       <2026-10-21 Wed 15:10> Baseline, =closest_point_many= as a plain loop over
+       =closest_point= (f64, 3D, =cargo bench --bench bench -- closest_point_many=). Random is
+       P2M's protocol: 1M uniform queries in the bounding box scaled 10x. Grid is the centers of
+       a 100³ voxel grid over the bounding box grown by 1, in x-major order.
+       | curve                  | random (Melem/s) | grid (Melem/s) |
+       |------------------------+------------------+----------------|
+       | line                   |              326 |            325 |
+       | arc                    |              125 |            220 |
+       | elliptic arc           |               23 |             19 |
+       | cubic spline, 30 spans |              5.7 |            3.8 |
+       Not measured: why the spline and elliptic arc are slower on the grid. Likely the grid
+       queries are closer to the curve, so fewer segments and intervals get culled.
+
+       - [ ] 2b. SIMD across the queries that share a piece, on top of the above.
+
     3. [ ] Threads, and runtime dispatch for AVX2 and AVX-512.
 
 * TODO Implement Polycurves
