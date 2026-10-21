@@ -115,7 +115,7 @@
   candidate. Compare the roots against both endpoints by squared distance, and call atan
   only for the winner: t = ½ + 2 atan(τ)/θ.
 
-  How we decided (=benches/closest_point.rs=, f64, 1024 queries):
+  How we decided (throwaway criterion bench, since deleted; f64, 1024 random queries):
   - Arc: the general form costs 13.4 ns/query in 2d and 14.1 ns in 3d. A 2d global-atan2
     version, a 2d perp(m) version and a 3d normal/cross version all came in within ±2%:
     atan2 dominates. Caching n bought nothing either. The trig-free point costs 3.7 ns (2d)
