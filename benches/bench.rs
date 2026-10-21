@@ -236,11 +236,27 @@ fn projection_queries((lo, hi): (DVec<3>, DVec<3>)) -> Vec<DVec<3>> {
         .collect()
 }
 
-fn b_project(c: &mut Criterion, label: &str, proj: &Projector<3, F64Adaptor>, queries: &[DVec<3>]) {
-    c.bench_function(label, |b| {
+/// Benchmarks `closest_point` and `closest_point_with_param` on the given curve.
+fn b_closest_point(
+    c: &mut Criterion,
+    curve: &str,
+    proj: &Projector<3, F64Adaptor>,
+    queries: &[DVec<3>],
+) {
+    c.bench_function(&format!("closest_point_{curve}"), |b| {
         let mut i = 0usize;
         b.iter(|| {
-            black_box(proj.project(black_box(queries[i])));
+            black_box(proj.closest_point(black_box(queries[i])));
+            i += 1;
+            if i >= queries.len() {
+                i = 0;
+            }
+        });
+    });
+    c.bench_function(&format!("closest_point_with_param_{curve}"), |b| {
+        let mut i = 0usize;
+        b.iter(|| {
+            black_box(proj.closest_point_with_param(black_box(queries[i])));
             i += 1;
             if i >= queries.len() {
                 i = 0;
@@ -249,11 +265,11 @@ fn b_project(c: &mut Criterion, label: &str, proj: &Projector<3, F64Adaptor>, qu
     });
 }
 
-fn b_projection(c: &mut Criterion) {
+fn b_closest_points(c: &mut Criterion) {
     let line = LineSeg3d::create(DVec([-1.0, 0.5, 0.0]), DVec([2.0, -1.0, 1.5]));
-    b_project(
+    b_closest_point(
         c,
-        "project_line",
+        "line",
         &Projector::from_line(&line),
         &projection_queries(line.bounds()),
     );
@@ -263,9 +279,9 @@ fn b_projection(c: &mut Criterion) {
         DVec([-2.5, 0.0, 0.0]),
     )
     .unwrap();
-    b_project(
+    b_closest_point(
         c,
-        "project_arc",
+        "arc",
         &Projector::from_arc(&arc),
         &projection_queries(arc.bounds()),
     );
@@ -276,9 +292,9 @@ fn b_projection(c: &mut Criterion) {
         false,
     )
     .unwrap();
-    b_project(
+    b_closest_point(
         c,
-        "project_elliptic_arc",
+        "elliptic_arc",
         &Projector::from_elliptic_arc(&earc),
         &projection_queries(earc.bounds()),
     );
@@ -294,9 +310,9 @@ fn b_projection(c: &mut Criterion) {
         })
         .collect();
     let spline = Spline3d::create_clamped(cps, 3).unwrap();
-    b_project(
+    b_closest_point(
         c,
-        "project_degree_03_spline_30_segments",
+        "degree_03_spline_30_segments",
         &Projector::from_spline(&spline).unwrap(),
         &projection_queries(spline.bounds()),
     );
@@ -319,7 +335,7 @@ fn benchmarks(c: &mut Criterion) {
     b_spline_bounds(c);
     b_spline_eval(c);
     b_spline_eval_with_deriv(c);
-    b_projection(c);
+    b_closest_points(c);
 }
 
 criterion_group!(benches, benchmarks);

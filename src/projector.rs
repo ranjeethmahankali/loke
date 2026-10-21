@@ -30,7 +30,8 @@ enum SegmentProjector<const DIM: usize, A: Adaptor<DIM>> {
         m: A::Vector,
         n: A::Vector,
         radius: A::Scalar,
-        cos_half: A::Scalar, // Cosine of half the sweep.
+        cos_half: A::Scalar,  // Cosine of half the sweep.
+        inv_angle: A::Scalar, // 1 / sweep, to turn the angle from the midpoint into `t`.
     },
     /// Frame at the midpoint of the arc, `P(α) - center = cos α U + sin α V` for `|α| <= θ/2`.
     /// With `τ = tan(α/2)`, `(P - q)·P' (1 + τ²)²` is a quartic in `τ`.
@@ -41,6 +42,7 @@ enum SegmentProjector<const DIM: usize, A: Adaptor<DIM>> {
         b_minus_a: A::Scalar, // V·V - U·U.
         w: A::Scalar,         // U·V.
         tau_max: A::Scalar,   // tan(θ/4).
+        inv_angle: A::Scalar, // 1 / θ.
     },
 }
 
@@ -92,6 +94,7 @@ impl<const DIM: usize, A: Adaptor<DIM> + TrigonometryAdaptor> Projector<DIM, A> 
                 n: A::normalize(arc.end_dir - arc.start_dir), // ⟂ m, by symmetry.
                 radius: arc.radius,
                 cos_half: A::cos(arc.angle * A::scalar(0.5)),
+                inv_angle: A::scalar(1.0) / arc.angle,
             }
         };
         Self::from_single(
@@ -119,6 +122,7 @@ impl<const DIM: usize, A: Adaptor<DIM> + TrigonometryAdaptor> Projector<DIM, A> 
                 b_minus_a: A::dot_product(v, v) - A::dot_product(u, u),
                 w: A::dot_product(u, v),
                 tau_max: A::tan(arc.angle * A::scalar(0.25)),
+                inv_angle: A::scalar(1.0) / arc.angle,
             }
         };
         Self::from_single(
@@ -207,32 +211,58 @@ impl<const DIM: usize, A: Adaptor<DIM> + TrigonometryAdaptor> Projector<DIM, A> 
 
     /// The closest point on the curve to `q`.
     #[inline]
-    pub fn project(&self, q: A::Vector) -> A::Vector {
+    pub fn closest_point(&self, q: A::Vector) -> A::Vector {
+        self.closest::<false>(q).point
+    }
+
+    /// The closest point on the curve to `q`, its parameter, and the index of its segment in
+    /// this projector. The parameter is local to the segment, in `[0, 1]`: for a spline that
+    /// is the parameter within the knot span, not the spline's own parameter.
+    #[inline]
+    pub fn closest_point_with_param(&self, q: A::Vector) -> (A::Vector, A::Scalar, usize) {
+        let best = self.closest::<true>(q);
+        (best.point, best.param, best.segment)
+    }
+
+    /// Shared by the public functions. Without `WANT_PARAM` the parameter code is dead, so
+    /// [`Self::closest_point`] stays small enough for the compiler to inline it into the
+    /// caller, which matters: see [`Self::closest_on_segment`].
+    #[inline(always)]
+    fn closest<const WANT_PARAM: bool>(&self, q: A::Vector) -> Candidate<DIM, A> {
         if self.infos.len() == 1 {
-            return self.project_segment(&self.infos[0], q);
+            return self.closest_on_segment::<WANT_PARAM>(0, q);
         }
         // Seeding with the nearest segment end lets the box test skip most segments before any
         // roots are found: 2.3 instead of 15 of 30 spline segments solved per query.
-        let mut best = (A::scalar(f64::INFINITY), q);
-        for info in self.infos.iter() {
-            best = closer::<DIM, A>(q, best, info.start);
-            best = closer::<DIM, A>(q, best, info.end);
+        let mut best = Candidate::new(q, self.infos[0].start, A::scalar(0.0), 0);
+        for (i, info) in self.infos.iter().enumerate() {
+            best = best.closer(q, info.start, A::scalar(0.0), i);
+            best = best.closer(q, info.end, A::scalar(1.0), i);
         }
-        for (info, &(lo, hi)) in self.infos.iter().zip(self.bounds.iter()) {
-            if box_distance_sq::<DIM, A>(q, lo, hi) < best.0 {
-                best = closer::<DIM, A>(q, best, self.project_segment(info, q));
+        for (i, &(lo, hi)) in self.bounds.iter().enumerate() {
+            if box_distance_sq::<DIM, A>(q, lo, hi) < best.dist_sq {
+                let candidate = self.closest_on_segment::<WANT_PARAM>(i, q);
+                if candidate.dist_sq < best.dist_sq {
+                    best = candidate;
+                }
             }
         }
-        best.1
+        best
     }
 
-    /// The closest point on the segment to `q`.
+    /// The closest point on segment `si` to `q`.
     ///
     /// Inlined all the way into the caller. Otherwise `q` and the result go through memory at
     /// every call boundary, and that chain of store forwards makes a line projection several
     /// times slower.
     #[inline(always)]
-    fn project_segment(&self, seg_info: &SegmentInfo<DIM, A>, q: A::Vector) -> A::Vector {
+    fn closest_on_segment<const WANT_PARAM: bool>(
+        &self,
+        si: usize,
+        q: A::Vector,
+    ) -> Candidate<DIM, A> {
+        let seg_info = &self.infos[si];
+        let (zero, one) = (A::scalar(0.0), A::scalar(1.0));
         match &seg_info.projector {
             SegmentProjector::Polynomial {
                 degree,
@@ -243,7 +273,7 @@ impl<const DIM: usize, A: Adaptor<DIM> + TrigonometryAdaptor> Projector<DIM, A> 
                 let degree = *degree;
                 let all = &self.polynomial_coefficients;
                 let n_coeff = 2 * degree;
-                let mut coef = [A::scalar(0.0); MAX_COEFFS];
+                let mut coef = [zero; MAX_COEFFS];
                 let coef = &mut coef[..n_coeff];
                 coef.copy_from_slice(&all[*position_dot_deriv_coeff_offset..][..n_coeff]);
                 for (ci, &offset) in deriv_coeff_offset.iter().enumerate() {
@@ -252,39 +282,35 @@ impl<const DIM: usize, A: Adaptor<DIM> + TrigonometryAdaptor> Projector<DIM, A> 
                         *c -= qi * d;
                     }
                 }
-                let mut roots = [A::scalar(0.0); MAX_COEFFS];
+                let mut roots = [zero; MAX_COEFFS];
                 let n_roots = polynomial::polynomial_roots_in_range::<A>(
                     coef,
                     &mut roots,
-                    A::scalar(0.0),
-                    A::scalar(1.0),
+                    zero,
+                    one,
                     A::scalar(ROOT_TOLERANCE),
                 )
                 .expect("INTERNAL ERROR: Degree is checked on construction");
                 let mut best =
-                    closer::<DIM, A>(q, start_candidate::<DIM, A>(q, seg_info), seg_info.end);
+                    Candidate::new(q, seg_info.start, zero, si).closer(q, seg_info.end, one, si);
                 for &t in &roots[..n_roots] {
                     let p = A::vector(std::array::from_fn(|ci| {
                         let offset = position_coeff_offset[ci];
                         polynomial::eval::<A>(&all[offset..offset + degree + 1], t)
                     }));
-                    best = closer::<DIM, A>(q, best, p);
+                    best = best.closer(q, p, t, si);
                 }
-                best.1
+                best
             }
             SegmentProjector::Line => {
                 let dir = seg_info.end - seg_info.start;
                 let len_sq = A::vector_length_sq(dir);
-                let t = if len_sq > A::scalar(0.0) {
-                    A::clamp(
-                        A::dot_product(q - seg_info.start, dir) / len_sq,
-                        A::scalar(0.0),
-                        A::scalar(1.0),
-                    )
+                let t = if len_sq > zero {
+                    A::clamp(A::dot_product(q - seg_info.start, dir) / len_sq, zero, one)
                 } else {
-                    A::scalar(0.0)
+                    zero
                 };
-                seg_info.start + dir * t
+                Candidate::new(q, seg_info.start + dir * t, t, si)
             }
             SegmentProjector::Arc {
                 center,
@@ -292,23 +318,26 @@ impl<const DIM: usize, A: Adaptor<DIM> + TrigonometryAdaptor> Projector<DIM, A> 
                 n,
                 radius,
                 cos_half,
+                inv_angle,
             } => {
-                // TODO: We need a variant of projection that returns the parameter value too. We
-                // might need to bring back the atan2. We can have two codepaths, or just go with
-                // the atan2. What is the comparison with and without atan2?
-
                 // The distance grows with the angle from the direction of d in the plane, and
                 // the arc is symmetric about m, so outside the sweep the nearer end is on the
                 // side of d·n.
                 let d = q - *center;
                 let (dm, dn) = (A::dot_product(d, *m), A::dot_product(d, *n));
                 let rho = A::sqrt(dm * dm + dn * dn);
-                if rho > A::scalar(0.0) && dm >= *cos_half * rho {
-                    *center + (*m * dm + *n * dn) * (*radius / rho)
-                } else if dn < A::scalar(0.0) {
-                    seg_info.start
+                if rho > zero && dm >= *cos_half * rho {
+                    // Only the parameter needs trig, at about 10 ns.
+                    let t = if WANT_PARAM {
+                        A::clamp(A::scalar(0.5) + A::atan2(dn, dm) * *inv_angle, zero, one)
+                    } else {
+                        zero
+                    };
+                    Candidate::new(q, *center + (*m * dm + *n * dn) * (*radius / rho), t, si)
+                } else if dn < zero {
+                    Candidate::new(q, seg_info.start, zero, si)
                 } else {
-                    seg_info.end
+                    Candidate::new(q, seg_info.end, one, si)
                 }
             }
             SegmentProjector::EllipticArc {
@@ -318,6 +347,7 @@ impl<const DIM: usize, A: Adaptor<DIM> + TrigonometryAdaptor> Projector<DIM, A> 
                 b_minus_a,
                 w,
                 tau_max,
+                inv_angle,
             } => {
                 let d = q - *center;
                 let (du, dv) = (A::dot_product(d, *u), A::dot_product(d, *v));
@@ -329,7 +359,7 @@ impl<const DIM: usize, A: Adaptor<DIM> + TrigonometryAdaptor> Projector<DIM, A> 
                     two * (du - *b_minus_a),
                     *w + dv,
                 ];
-                let mut roots = [A::scalar(0.0); 4];
+                let mut roots = [zero; 4];
                 let n_roots = polynomial::polynomial_roots_in_range::<A>(
                     &coef,
                     &mut roots,
@@ -339,36 +369,58 @@ impl<const DIM: usize, A: Adaptor<DIM> + TrigonometryAdaptor> Projector<DIM, A> 
                 )
                 .expect("INTERNAL ERROR: A quartic is always supported");
                 let mut best =
-                    closer::<DIM, A>(q, start_candidate::<DIM, A>(q, seg_info), seg_info.end);
+                    Candidate::new(q, seg_info.start, zero, si).closer(q, seg_info.end, one, si);
+                // Roots carry τ as their parameter until the end, so atan only runs once.
+                let mut best_is_root = false;
                 for &tau in &roots[..n_roots] {
-                    let k = A::scalar(1.0) / (A::scalar(1.0) + tau * tau);
-                    let (cos_a, sin_a) = ((A::scalar(1.0) - tau * tau) * k, two * tau * k);
-                    best = closer::<DIM, A>(q, best, *center + *u * cos_a + *v * sin_a);
+                    let k = one / (one + tau * tau);
+                    let (cos_a, sin_a) = ((one - tau * tau) * k, two * tau * k);
+                    let candidate = Candidate::new(q, *center + *u * cos_a + *v * sin_a, tau, si);
+                    if candidate.dist_sq < best.dist_sq {
+                        (best, best_is_root) = (candidate, true);
+                    }
                 }
-                best.1
+                if WANT_PARAM && best_is_root {
+                    // α = 2 atan(τ), and t = 1/2 + α/θ.
+                    let t = A::scalar(0.5) + two * A::atan2(best.param, one) * *inv_angle;
+                    best.param = A::clamp(t, zero, one);
+                }
+                best
             }
         }
     }
 }
 
-/// `(squared distance, point)` of the segment start, to seed a search over candidates.
-#[inline(always)]
-fn start_candidate<const DIM: usize, A: Adaptor<DIM>>(
-    q: A::Vector,
-    info: &SegmentInfo<DIM, A>,
-) -> (A::Scalar, A::Vector) {
-    (A::vector_length_sq(info.start - q), info.start)
+/// A point on a segment, with its squared distance from the query, its parameter on the
+/// segment, and the segment index.
+struct Candidate<const DIM: usize, A: Adaptor<DIM>> {
+    dist_sq: A::Scalar,
+    point: A::Vector,
+    param: A::Scalar,
+    segment: usize,
 }
 
-/// `best` (squared distance, point), or `p` if that is closer to `q`.
-#[inline(always)]
-fn closer<const DIM: usize, A: Adaptor<DIM>>(
-    q: A::Vector,
-    best: (A::Scalar, A::Vector),
-    p: A::Vector,
-) -> (A::Scalar, A::Vector) {
-    let dsq = A::vector_length_sq(p - q);
-    if dsq < best.0 { (dsq, p) } else { best }
+impl<const DIM: usize, A: Adaptor<DIM>> Candidate<DIM, A> {
+    #[inline(always)]
+    fn new(q: A::Vector, point: A::Vector, param: A::Scalar, segment: usize) -> Self {
+        Self {
+            dist_sq: A::vector_length_sq(point - q),
+            point,
+            param,
+            segment,
+        }
+    }
+
+    /// `self`, or the given point if that is closer to `q`.
+    #[inline(always)]
+    fn closer(self, q: A::Vector, point: A::Vector, param: A::Scalar, segment: usize) -> Self {
+        let other = Self::new(q, point, param, segment);
+        if other.dist_sq < self.dist_sq {
+            other
+        } else {
+            self
+        }
+    }
 }
 
 /// Squared distance from `q` to the box `[lo, hi]`, zero inside.
@@ -430,15 +482,28 @@ mod test {
     }
 
     /// Projects random queries, and checks that the result is on the curve and as close as
-    /// the brute force distance.
+    /// the brute force distance. `on_segment` evaluates the curve at a segment parameter, to
+    /// check the parameter and segment index from [`Projector::closest_point_with_param`].
     fn check<const D: usize>(
         proj: &Projector<D, F64Adaptor>,
         f: impl Fn(f64) -> DVec<D> + Copy,
         domain: (f64, f64),
+        on_segment: impl Fn(f64, usize) -> DVec<D>,
         queries: impl IntoIterator<Item = DVec<D>>,
     ) {
         for q in queries {
-            let p = proj.project(q);
+            let p = proj.closest_point(q);
+            let (p_param, t, segment) = proj.closest_point_with_param(q);
+            assert_eq!(p, p_param, "q = {q:?}: the two functions disagree");
+            assert!(
+                (0.0..=1.0).contains(&t),
+                "q = {q:?}: t = {t} is outside [0, 1]"
+            );
+            let at_t = on_segment(t, segment);
+            assert!(
+                (at_t - p).length() <= 1e-9 * (1.0 + p.length()),
+                "q = {q:?}, p = {p:?}, but segment {segment} at t = {t} is {at_t:?}"
+            );
             let reference = brute_force_dist(f, domain, q);
             let found = (p - q).length();
             let scale = 1.0 + q.length();
@@ -469,13 +534,21 @@ mod test {
                 &Projector::from_line(&line),
                 |t| line.point(t).unwrap(),
                 (0.0, 1.0),
+                |t, segment| {
+                    assert_eq!(segment, 0);
+                    line.point(t).unwrap()
+                },
                 queries,
             );
         }
         // Zero length.
         let p = DVec([1.0, 2.0]);
         let proj = Projector::from_line(&LineSeg::<2, F64Adaptor>::create(p, p));
-        assert_eq!(proj.project(DVec([5.0, -1.0])), p);
+        assert_eq!(proj.closest_point(DVec([5.0, -1.0])), p);
+        assert_eq!(
+            proj.closest_point_with_param(DVec([5.0, -1.0])),
+            (p, 0.0, 0)
+        );
     }
 
     fn rand_arc<const D: usize>(rng: &mut StdRng) -> Arc<D, F64Adaptor> {
@@ -498,6 +571,10 @@ mod test {
                 &Projector::from_arc(&arc),
                 |t| arc.point(t).unwrap(),
                 (0.0, 1.0),
+                |t, segment| {
+                    assert_eq!(segment, 0);
+                    arc.point(t).unwrap()
+                },
                 queries,
             );
         }
@@ -559,6 +636,10 @@ mod test {
                     &Projector::from_elliptic_arc(&arc),
                     |t| arc.point(t).unwrap(),
                     (0.0, 1.0),
+                    |t, segment| {
+                        assert_eq!(segment, 0);
+                        arc.point(t).unwrap()
+                    },
                     queries,
                 );
             }
@@ -590,10 +671,17 @@ mod test {
                 let spline = Spline::<D, F64Adaptor>::create(cps, knots, degree).unwrap();
                 let proj = Projector::from_spline(&spline).unwrap();
                 let queries = rand_queries::<D>(&mut rng, 8);
+                // Segment i is the i-th non-empty knot span.
+                let mut spans = spline.knots().to_vec();
+                spans.dedup();
                 check(
                     &proj,
                     |u| spline.point(u).unwrap(),
                     spline.domain(),
+                    |t, segment| {
+                        let (u0, u1) = (spans[segment], spans[segment + 1]);
+                        spline.point(u0 + t * (u1 - u0)).unwrap()
+                    },
                     queries,
                 );
             }
@@ -629,9 +717,9 @@ mod test {
             FVec([-1.0, 0.0, 0.0]),
         )
         .unwrap();
-        let p = Projector::from_arc(&arc).project(FVec([0.0, 3.0, 2.0]));
+        let p = Projector::from_arc(&arc).closest_point(FVec([0.0, 3.0, 2.0]));
         assert!((p - FVec([0.0, 1.0, 0.0])).length() < 1e-6);
-        let p = Projector::from_arc(&arc).project(FVec([0.5, -3.0, 0.0]));
+        let p = Projector::from_arc(&arc).closest_point(FVec([0.5, -3.0, 0.0]));
         assert!((p - FVec([1.0, 0.0, 0.0])).length() < 1e-6);
     }
 }
