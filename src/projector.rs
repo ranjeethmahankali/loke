@@ -206,66 +206,47 @@ impl<const DIM: usize, A: Adaptor<DIM> + TrigonometryAdaptor> Projector<DIM, A> 
     }
 
     /// The closest point on the curve to `q`.
+    #[inline]
     pub fn project(&self, q: A::Vector) -> A::Vector {
+        if self.infos.len() == 1 {
+            return self.project_segment(&self.infos[0], q);
+        }
+        // Seeding with the nearest segment end lets the box test skip most segments before any
+        // roots are found: 2.3 instead of 15 of 30 spline segments solved per query.
         let mut best = (A::scalar(f64::INFINITY), q);
+        for info in self.infos.iter() {
+            best = closer::<DIM, A>(q, best, info.start);
+            best = closer::<DIM, A>(q, best, info.end);
+        }
         for (info, &(lo, hi)) in self.infos.iter().zip(self.bounds.iter()) {
             if box_distance_sq::<DIM, A>(q, lo, hi) < best.0 {
-                self.project_segment(info, q, &mut best);
+                best = closer::<DIM, A>(q, best, self.project_segment(info, q));
             }
         }
         best.1
     }
 
-    /// Updates `best` (squared distance, point) with the closest point on the segment.
-    fn project_segment(
-        &self,
-        info: &SegmentInfo<DIM, A>,
-        q: A::Vector,
-        best: &mut (A::Scalar, A::Vector),
-    ) {
-        let mut consider = |p: A::Vector| {
-            let dsq = A::vector_length_sq(p - q);
-            if dsq < best.0 {
-                *best = (dsq, p);
-            }
-        };
+    /// The closest point on the segment to `q`.
+    ///
+    /// Lines and arcs are inlined all the way into the caller, and the heavy cases are calls.
+    /// Otherwise `q` and the result go through memory at every call boundary, and that chain
+    /// of store forwards makes a line projection several times slower.
+    #[inline(always)]
+    fn project_segment(&self, info: &SegmentInfo<DIM, A>, q: A::Vector) -> A::Vector {
         match &info.projector {
             SegmentProjector::Polynomial {
                 degree,
                 position_dot_deriv_coeff_offset,
                 deriv_coeff_offset,
                 position_coeff_offset,
-            } => {
-                let degree = *degree;
-                let all = &self.polynomial_coefficients;
-                let n_coeff = 2 * degree;
-                let mut coef = [A::scalar(0.0); MAX_COEFFS];
-                let coef = &mut coef[..n_coeff];
-                coef.copy_from_slice(&all[*position_dot_deriv_coeff_offset..][..n_coeff]);
-                for (ci, &offset) in deriv_coeff_offset.iter().enumerate() {
-                    let qi = A::vector_coord(q, ci);
-                    for (c, &d) in coef.iter_mut().zip(&all[offset..offset + degree]) {
-                        *c -= qi * d;
-                    }
-                }
-                let mut roots = [A::scalar(0.0); MAX_COEFFS];
-                let n_roots = polynomial::polynomial_roots_in_range::<A>(
-                    coef,
-                    &mut roots,
-                    A::scalar(0.0),
-                    A::scalar(1.0),
-                    A::scalar(ROOT_TOLERANCE),
-                )
-                .expect("INTERNAL ERROR: Degree is checked on construction");
-                consider(info.start);
-                consider(info.end);
-                for &t in &roots[..n_roots] {
-                    consider(A::vector(std::array::from_fn(|ci| {
-                        let offset = position_coeff_offset[ci];
-                        polynomial::eval::<A>(&all[offset..offset + degree + 1], t)
-                    })));
-                }
-            }
+            } => self.project_polynomial(
+                *degree,
+                *position_dot_deriv_coeff_offset,
+                deriv_coeff_offset,
+                position_coeff_offset,
+                info,
+                q,
+            ),
             SegmentProjector::Line => {
                 let dir = info.end - info.start;
                 let len_sq = A::vector_length_sq(dir);
@@ -278,7 +259,7 @@ impl<const DIM: usize, A: Adaptor<DIM> + TrigonometryAdaptor> Projector<DIM, A> 
                 } else {
                     A::scalar(0.0)
                 };
-                consider(info.start + dir * t);
+                info.start + dir * t
             }
             SegmentProjector::Arc {
                 center,
@@ -293,13 +274,13 @@ impl<const DIM: usize, A: Adaptor<DIM> + TrigonometryAdaptor> Projector<DIM, A> 
                 let d = q - *center;
                 let (dm, dn) = (A::dot_product(d, *m), A::dot_product(d, *n));
                 let rho = A::sqrt(dm * dm + dn * dn);
-                consider(if rho > A::scalar(0.0) && dm >= *cos_half * rho {
+                if rho > A::scalar(0.0) && dm >= *cos_half * rho {
                     *center + (*m * dm + *n * dn) * (*radius / rho)
                 } else if dn < A::scalar(0.0) {
                     info.start
                 } else {
                     info.end
-                });
+                }
             }
             SegmentProjector::EllipticArc {
                 center,
@@ -308,36 +289,111 @@ impl<const DIM: usize, A: Adaptor<DIM> + TrigonometryAdaptor> Projector<DIM, A> 
                 b_minus_a,
                 w,
                 tau_max,
-            } => {
-                let d = q - *center;
-                let (du, dv) = (A::dot_product(d, *u), A::dot_product(d, *v));
-                let two = A::scalar(2.0);
-                let coef = [
-                    *w - dv,
-                    two * (*b_minus_a + du),
-                    A::scalar(-6.0) * *w,
-                    two * (du - *b_minus_a),
-                    *w + dv,
-                ];
-                let mut roots = [A::scalar(0.0); 4];
-                let n_roots = polynomial::polynomial_roots_in_range::<A>(
-                    &coef,
-                    &mut roots,
-                    -*tau_max,
-                    *tau_max,
-                    A::scalar(ROOT_TOLERANCE),
-                )
-                .expect("INTERNAL ERROR: A quartic is always supported");
-                consider(info.start);
-                consider(info.end);
-                for &tau in &roots[..n_roots] {
-                    let k = A::scalar(1.0) / (A::scalar(1.0) + tau * tau);
-                    let (cos_a, sin_a) = ((A::scalar(1.0) - tau * tau) * k, two * tau * k);
-                    consider(*center + *u * cos_a + *v * sin_a);
-                }
-            }
+            } => Self::project_elliptic_arc(*center, *u, *v, *b_minus_a, *w, *tau_max, info, q),
         }
     }
+
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn project_polynomial(
+        &self,
+        degree: usize,
+        position_dot_deriv_coeff_offset: usize,
+        deriv_coeff_offset: &[usize; DIM],
+        position_coeff_offset: &[usize; DIM],
+        info: &SegmentInfo<DIM, A>,
+        q: A::Vector,
+    ) -> A::Vector {
+        let all = &self.polynomial_coefficients;
+        let n_coeff = 2 * degree;
+        let mut coef = [A::scalar(0.0); MAX_COEFFS];
+        let coef = &mut coef[..n_coeff];
+        coef.copy_from_slice(&all[position_dot_deriv_coeff_offset..][..n_coeff]);
+        for (ci, &offset) in deriv_coeff_offset.iter().enumerate() {
+            let qi = A::vector_coord(q, ci);
+            for (c, &d) in coef.iter_mut().zip(&all[offset..offset + degree]) {
+                *c -= qi * d;
+            }
+        }
+        let mut roots = [A::scalar(0.0); MAX_COEFFS];
+        let n_roots = polynomial::polynomial_roots_in_range::<A>(
+            coef,
+            &mut roots,
+            A::scalar(0.0),
+            A::scalar(1.0),
+            A::scalar(ROOT_TOLERANCE),
+        )
+        .expect("INTERNAL ERROR: Degree is checked on construction");
+        let mut best = closer::<DIM, A>(q, start_candidate::<DIM, A>(q, info), info.end);
+        for &t in &roots[..n_roots] {
+            let p = A::vector(std::array::from_fn(|ci| {
+                let offset = position_coeff_offset[ci];
+                polynomial::eval::<A>(&all[offset..offset + degree + 1], t)
+            }));
+            best = closer::<DIM, A>(q, best, p);
+        }
+        best.1
+    }
+
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn project_elliptic_arc(
+        center: A::Vector,
+        u: A::Vector,
+        v: A::Vector,
+        b_minus_a: A::Scalar,
+        w: A::Scalar,
+        tau_max: A::Scalar,
+        info: &SegmentInfo<DIM, A>,
+        q: A::Vector,
+    ) -> A::Vector {
+        let d = q - center;
+        let (du, dv) = (A::dot_product(d, u), A::dot_product(d, v));
+        let two = A::scalar(2.0);
+        let coef = [
+            w - dv,
+            two * (b_minus_a + du),
+            A::scalar(-6.0) * w,
+            two * (du - b_minus_a),
+            w + dv,
+        ];
+        let mut roots = [A::scalar(0.0); 4];
+        let n_roots = polynomial::polynomial_roots_in_range::<A>(
+            &coef,
+            &mut roots,
+            -tau_max,
+            tau_max,
+            A::scalar(ROOT_TOLERANCE),
+        )
+        .expect("INTERNAL ERROR: A quartic is always supported");
+        let mut best = closer::<DIM, A>(q, start_candidate::<DIM, A>(q, info), info.end);
+        for &tau in &roots[..n_roots] {
+            let k = A::scalar(1.0) / (A::scalar(1.0) + tau * tau);
+            let (cos_a, sin_a) = ((A::scalar(1.0) - tau * tau) * k, two * tau * k);
+            best = closer::<DIM, A>(q, best, center + u * cos_a + v * sin_a);
+        }
+        best.1
+    }
+}
+
+/// `(squared distance, point)` of the segment start, to seed a search over candidates.
+#[inline(always)]
+fn start_candidate<const DIM: usize, A: Adaptor<DIM>>(
+    q: A::Vector,
+    info: &SegmentInfo<DIM, A>,
+) -> (A::Scalar, A::Vector) {
+    (A::vector_length_sq(info.start - q), info.start)
+}
+
+/// `best` (squared distance, point), or `p` if that is closer to `q`.
+#[inline(always)]
+fn closer<const DIM: usize, A: Adaptor<DIM>>(
+    q: A::Vector,
+    best: (A::Scalar, A::Vector),
+    p: A::Vector,
+) -> (A::Scalar, A::Vector) {
+    let dsq = A::vector_length_sq(p - q);
+    if dsq < best.0 { (dsq, p) } else { best }
 }
 
 /// Squared distance from `q` to the box `[lo, hi]`, zero inside.

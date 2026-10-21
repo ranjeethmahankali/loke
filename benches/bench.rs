@@ -1,5 +1,7 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use loke::{Arc3d, DVec, EllipticArc3d, F64Adaptor, Spline3d, polynomial_roots};
+use loke::{
+    Arc3d, DVec, EllipticArc3d, F64Adaptor, LineSeg3d, Projector, Spline3d, polynomial_roots,
+};
 use rand::{RngExt, SeedableRng, rngs::SmallRng};
 
 // ---------------------------------------------------------------------------
@@ -222,6 +224,84 @@ fn b_elliptic_arc_uniform_samples(c: &mut Criterion) {
     }
 }
 
+/// Random query points in the bounding box of the curve, grown by 1 on every side.
+fn projection_queries((lo, hi): (DVec<3>, DVec<3>)) -> Vec<DVec<3>> {
+    let mut rng = SmallRng::seed_from_u64(SEED);
+    (0..NUM_POLYS)
+        .map(|_| {
+            DVec(std::array::from_fn(|i| {
+                rng.random_range(lo[i] - 1.0..hi[i] + 1.0)
+            }))
+        })
+        .collect()
+}
+
+fn b_project(c: &mut Criterion, label: &str, proj: &Projector<3, F64Adaptor>, queries: &[DVec<3>]) {
+    c.bench_function(label, |b| {
+        let mut i = 0usize;
+        b.iter(|| {
+            black_box(proj.project(black_box(queries[i])));
+            i += 1;
+            if i >= queries.len() {
+                i = 0;
+            }
+        });
+    });
+}
+
+fn b_projection(c: &mut Criterion) {
+    let line = LineSeg3d::create(DVec([-1.0, 0.5, 0.0]), DVec([2.0, -1.0, 1.5]));
+    b_project(
+        c,
+        "project_line",
+        &Projector::from_line(&line),
+        &projection_queries(line.bounds()),
+    );
+    let arc = Arc3d::from_three_points(
+        DVec([-3.5, 0.0, 0.0]),
+        DVec([-3.0, 1.5, 0.0]),
+        DVec([-2.5, 0.0, 0.0]),
+    )
+    .unwrap();
+    b_project(
+        c,
+        "project_arc",
+        &Projector::from_arc(&arc),
+        &projection_queries(arc.bounds()),
+    );
+    let earc = EllipticArc3d::from_center_start_end(
+        DVec([-3.0, 0.0, 0.0]),
+        DVec([-0.5, 0.3, 0.0]),
+        DVec([-3.2, 1.1, 0.0]),
+        false,
+    )
+    .unwrap();
+    b_project(
+        c,
+        "project_elliptic_arc",
+        &Projector::from_elliptic_arc(&earc),
+        &projection_queries(earc.bounds()),
+    );
+    // Degree 3, 33 control points: 30 knot spans.
+    let mut rng = SmallRng::seed_from_u64(SEED);
+    let cps: Vec<DVec<3>> = (0..33)
+        .map(|i| {
+            DVec([
+                i as f64 * 0.5,
+                rng.random_range(-2.0..2.0),
+                rng.random_range(-2.0..2.0),
+            ])
+        })
+        .collect();
+    let spline = Spline3d::create_clamped(cps, 3).unwrap();
+    b_project(
+        c,
+        "project_degree_03_spline_30_segments",
+        &Projector::from_spline(&spline).unwrap(),
+        &projection_queries(spline.bounds()),
+    );
+}
+
 fn benchmarks(c: &mut Criterion) {
     b_root_finding::<4>(c, "degree_03_root_finding");
     b_root_finding::<5>(c, "degree_04_root_finding");
@@ -239,6 +319,7 @@ fn benchmarks(c: &mut Criterion) {
     b_spline_bounds(c);
     b_spline_eval(c);
     b_spline_eval_with_deriv(c);
+    b_projection(c);
 }
 
 criterion_group!(benches, benchmarks);
