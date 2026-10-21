@@ -146,10 +146,34 @@
     - State "NEXT"       from "TODO"       [2026-10-21 Wed 10:33]
     :END:
 
-    1. [ ] Replace the root finder only. Keep the current pruning, but solve spline spans and
+    1. [X] Replace the root finder only. Keep the current pruning, but solve spline spans and
        elliptic arcs with Newton started from the nearest of K precomputed samples per span.
        This isolates the cost of root finding (63-85% of spline and ellipse time). Check
        accuracy against the current exact projector.
+
+       <2026-10-21 Wed 10:43> Done, and exact. What we do:
+       - Sample each spline span and elliptic arc so the tangent turns at most 1 rad between
+         samples (elliptic arcs also at most 1 rad of angle). Per interval, store a ball that
+         contains the curve (Bézier control points for splines, the tangent triangle for
+         ellipses), and the Bernstein coefficients of the dot polynomial g = (P - q)·P' as a
+         constant row plus rows linear in the query (-q_i for splines, d·U and d·V for
+         ellipses).
+       - Per query, skip intervals whose ball is farther than the best point. In the rest,
+         sign changes of the Bernstein coefficients bound the roots of g: none, skip; one going
+         from negative to positive, Newton in that bracket (bisecting if a step leaves it);
+         more, split with de Casteljau until each piece has at most one (0.03 per query).
+       - Elliptic arc intervals each use a local half-angle parameter around their middle
+         angle. One global tan(α/2) gets huge for sweeps past π, and the Bernstein signs came
+         out wrong (up to 89% distance error near a full turn).
+       - Contiguous segments seed the best distance with segment starts only.
+       Plain loops, f64, 3D: elliptic arc 85 -> 52 ns, 30 span cubic spline 487 -> 333 ns; lines and
+       arcs unchanged (3.0 and 3.6 ns). The scan over segments (seeding and boxes) is now ~130 ns of
+       the spline's time, and Newton is latency bound: both are for 2 and 3.  Tests: 200k spline
+       queries (degrees 1-5) and 360k elliptic arc queries (ratios up to 100:1, sweeps up to 2π -
+       1e-6) matched the root finder within 2e-15 relative distance. Running Newton only from the
+       samples' local minima missed minima between samples, and checking the sign of g only at
+       interval ends still missed 38 of 200k spline queries (up to 1.6% distance error), hence the
+       balls and Bernstein bounds.  =t_matches_root_finder= keeps the root finder as the reference.
     2. [ ] A grid (or octree) over query space, with a conservative candidate list per cell: the
        pieces whose min distance to the cell is at most the smallest max distance of any
        piece. Group queries by cell, and run SIMD across the queries that share a piece.
