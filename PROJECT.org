@@ -68,6 +68,148 @@
 
    <2026-10-20 Tue 18:31> Doing this before the fma change, to get a baseline.
 
+* NEXT tn8bmt - Closest Point
+  :PROPERTIES:
+  :CREATED:  2026-08-22 Sat 08:51
+  :END:
+  :LOGBOOK:
+  - State "NEXT"       from "TODO"       [2026-10-20 Tue 19:23]
+  :END:
+
+  This could be a library feature. For maximum performance, splines would need to cache some
+  polynomials, and sample points. So maybe provide an 'projector' object that caches this stuff,
+  deals with all curve types, and projects points onto the curves.
+
+  Spline projection logic is dimension agnostic. Lines are trivial. Arcs are interesting.
+
+  Splines need to find all roots of the dot product polynomial, and find the closest point from that
+  list. They should also include the end points.
+
+  This is the general idea for all curves. Just happens to be very trivial for lines.
+
+  I can write specialized logic for 2d and 3d arcs. I would need to look at the derivative
+  expression for the general dimension agnostic arc, and find all points where the dot product with
+  the query point and the tangent is zero. I wonder if I can generalize this. If I can, I should
+  compare the performance with the special case logic for 2d and 3d arcs. Maybe the generalization
+  is just as fast, and I don't need the specializations? Unlikely in 2d, unsure in 3d, very
+  interesting to try.
+
+  <2026-10-20 Tue 19:38> Worked out arcs and elliptic arcs. No 2d/3d specializations.
+
+  Arc: frame at the midpoint, m = mid_dir, n = normalize(end_dir - start_dir) (⟂ m by
+  symmetry). With d = q - c, P(ψ) = c + r(cos ψ m + sin ψ n), ψ = θ(t - ½):
+      (P - q)·P' = rθ (d·m sin ψ - d·n cos ψ) = rθρ sin(ψ - ψ*),  ψ* = atan2(d·n, d·m).
+  r² cancels and the out-of-plane part of d drops out. ψ* is the only minimum on the circle,
+  and distance grows with |ψ - ψ*|, so clamping is exact:
+      t = clamp(½ + atan2(d·n, d·m)/θ, 0, 1).
+  If only the point is needed, skip the atan2: inside iff d·m >= cos(θ/2)ρ, ρ = |(d·m, d·n)|,
+  then c + r(d·m m + d·n n)/ρ, else start if d·n < 0, else end.
+
+  Elliptic arc: the same midpoint frame, U = mid_vec, V = tangent(0.5)/θ, and α = θ(t - ½).
+  Cache a = U·U, b = V·V, w = U·V. Per query, du = d·U and dv = d·V. Substituting
+  τ = tan(α/2), (P - q)·P' (1 + τ²)² is the quartic (ascending)
+      [w - dv,  2(b - a + du),  -6w,  2(du - b + a),  w + dv]
+  on τ in [-tan(θ/4), tan(θ/4)]. That range is finite because θ < 2π, so a single window
+  covers the whole arc. Solve with =polynomial_roots_in_range= at the default tolerance
+  (6e-7). Each root gives cos α = (1 - τ²)/(1 + τ²) and sin α = 2τ/(1 + τ²), so no trig per
+  candidate. Compare the roots against both endpoints by squared distance, and call atan
+  only for the winner: t = ½ + 2 atan(τ)/θ.
+
+  How we decided (throwaway criterion bench, since deleted; f64, 1024 random queries):
+  - Arc: the general form costs 13.4 ns/query in 2d and 14.1 ns in 3d. A 2d global-atan2
+    version, a 2d perp(m) version and a 3d normal/cross version all came in within ±2%:
+    atan2 dominates. Caching n bought nothing either. The trig-free point costs 3.7 ns (2d)
+    and 5.5 ns (3d). Against brute force (dense samples plus golden section) in 2d, 3d and
+    5d, the worst excess distance was 4e-14 relative.
+  - Elliptic arc: ~100 ns/query at θ = 2, ~200 ns at θ = 5. Splitting into two half
+    windows (|τ| <= 1) was 10-20% slower, and no more accurate. Tightening the tolerance to
+    1e-10 or 1e-14 was 20-95% slower, and no more accurate: the last Newton step already
+    lands far inside the tolerance. Over moderate, 100:1 and near-full-turn arcs, the worst
+    excess distance was 4e-15 relative, and the worst sin(angle(P - q, P')) at interior
+    results was 1e-10. Near a full turn (θ > 2π - 1e-4) the error is ~5e-11, which comes
+    from =point()= itself (it divides by sin(θ/2)), not from the projection.
+
+** NEXT Performance Improvements
+   :PROPERTIES:
+   :CREATED:  2026-10-21 Wed 09:49
+   :END:
+   :LOGBOOK:
+   - State "NEXT"       from "TODO"       [2026-10-21 Wed 14:23]
+   :END:
+
+   There is newer research, such as: [[id:fe40e404-a625-4775-8825-ec57932635a2][P2M: Closest Point On Mesh Algo]], that can help write even
+   faster, bulk query friendly, SIMD friendly algorithms, that are very different (rewrite) from
+   what we have today.
+
+*** NEXT Ideas to Explore
+    :PROPERTIES:
+    :CREATED:  2026-10-21 Wed 10:04
+    :END:
+    :LOGBOOK:
+    - State "NEXT"       from "TODO"       [2026-10-21 Wed 10:33]
+    :END:
+
+    1. [X] Replace the root finder only. Keep the current pruning, but solve spline spans and
+       elliptic arcs with Newton started from the nearest of K precomputed samples per span.
+       This isolates the cost of root finding (63-85% of spline and ellipse time). Check
+       accuracy against the current exact projector.
+
+       <2026-10-21 Wed 10:43> Done, and exact. What we do:
+       - Sample each spline span and elliptic arc so the tangent turns at most 1 rad between
+         samples (elliptic arcs also at most 1 rad of angle). Per interval, store a ball that
+         contains the curve (Bézier control points for splines, the tangent triangle for
+         ellipses), and the Bernstein coefficients of the dot polynomial g = (P - q)·P' as a
+         constant row plus rows linear in the query (-q_i for splines, d·U and d·V for
+         ellipses).
+       - Per query, skip intervals whose ball is farther than the best point. In the rest,
+         sign changes of the Bernstein coefficients bound the roots of g: none, skip; one going
+         from negative to positive, Newton in that bracket (bisecting if a step leaves it);
+         more, split with de Casteljau until each piece has at most one (0.03 per query).
+       - Elliptic arc intervals each use a local half-angle parameter around their middle
+         angle. One global tan(α/2) gets huge for sweeps past π, and the Bernstein signs came
+         out wrong (up to 89% distance error near a full turn).
+       - Contiguous segments seed the best distance with segment starts only.
+       Plain loops, f64, 3D: elliptic arc 85 -> 52 ns, 30 span cubic spline 487 -> 333 ns; lines and
+       arcs unchanged (3.0 and 3.6 ns). The scan over segments (seeding and boxes) is now ~130 ns of
+       the spline's time, and Newton is latency bound: both are for 2 and 3.  Tests: 200k spline
+       queries (degrees 1-5) and 360k elliptic arc queries (ratios up to 100:1, sweeps up to 2π -
+       1e-6) matched the root finder within 2e-15 relative distance. Running Newton only from the
+       samples' local minima missed minima between samples, and checking the sign of g only at
+       interval ends still missed 38 of 200k spline queries (up to 1.6% distance error), hence the
+       balls and Bernstein bounds.  =t_matches_root_finder= keeps the root finder as the reference.
+
+    2. [ ] Bulk queries, and a BVH over the curve. In scalar code first; SIMD is 2b, last.
+       - [X] =closest_point_many= and =closest_point_with_param_many=: queries in a slice,
+         results in slices of the same length (separate slices for points, params and segment
+         indices), =Error::InvalidArgument= on a length mismatch. This is where query ordering,
+         SIMD and threads go later, without changing the API.
+       - [ ] A BVH (octree or kd tree) over the pieces: the sample intervals with their balls,
+         and lines and arcs whole. Nearest first traversal, pruned by the best distance so far,
+         so it prunes for queries anywhere in space, not just inside a grid. It replaces the
+         linear scan over segments, so single queries gain too. Track build time and memory.
+       - [ ] Sort the queries of a batch along a Morton curve (scratch from
+         =with_thread_local_buffers=), and seed each query's best distance from its neighbour's
+         closest point.
+       - [ ] Maybe later: P2M's interception table, as a cache of candidate lists per query
+         space cell on top of the tree, if the traversal dominates.
+
+       <2026-10-21 Wed 15:10> Baseline, =closest_point_many= as a plain loop over
+       =closest_point= (f64, 3D, =cargo bench --bench bench -- closest_point_many=). Random is
+       P2M's protocol: 1M uniform queries in the bounding box scaled 10x. Grid is the centers of
+       a 100³ voxel grid over the bounding box grown by 1, in x-major order.
+       | curve                  | random (Melem/s) | grid (Melem/s) |
+       |------------------------+------------------+----------------|
+       | line                   |              326 |            325 |
+       | arc                    |              125 |            220 |
+       | elliptic arc           |               23 |             19 |
+       | cubic spline, 30 spans |              5.7 |            3.8 |
+       Not measured: why the spline and elliptic arc are slower on the grid. Likely the grid
+       queries are closer to the curve, so fewer segments and intervals get culled.
+
+       - [ ] 2b. SIMD across the queries that share a piece, on top of the above.
+
+    3. [ ] Threads, and runtime dispatch for AVX2 and AVX-512.
+
 * TODO Implement Polycurves
   :PROPERTIES:
   :CREATED:  2026-06-06 Sat 16:36
@@ -112,21 +254,3 @@
   rigid, try to transform an arc, and if the error is bigger than epsilon during arc creation,
   fallback to ellipse? Actually that last idea sounds good. It would preserve arcs that happen to
   get projected on to a parallel plane, and only convert arcs to ellipses when there is a need.
-
-* TODO Closest Point
-  :PROPERTIES:
-  :CREATED:  2026-08-22 Sat 08:51
-  :END:
-
-  This could be a library feature. For maximum performance, splines would need to cache some
-  polynomials, and sample points. So maybe provide an 'projector' object that caches this stuff,
-  deals with all curve types, and projects points onto the curves.
-
-  Spline projection logic is dimension agnostic. Lines are trivial. Arcs are interesting.
-
-  I can write specialized logic for 2d and 3d arcs. I would need to look at the derivative
-  expression for the general dimension agnostic arc, and find all points where the dot product with
-  the query point and the tangent is zero. I wonder if I can generalize this. If I can, I should
-  compare the performance with the special case logic for 2d and 3d arcs. Maybe the generalization
-  is just as fast, and I don't need the specializations? Unlikely in 2d, unsure in 3d, very
-  interesting to try.

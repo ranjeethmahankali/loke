@@ -1,5 +1,7 @@
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use loke::{Arc3d, DVec, EllipticArc3d, F64Adaptor, Spline3d, polynomial_roots};
+use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
+use loke::{
+    Arc3d, DVec, EllipticArc3d, F64Adaptor, LineSeg3d, Projector, Spline3d, polynomial_roots,
+};
 use rand::{RngExt, SeedableRng, rngs::SmallRng};
 
 // ---------------------------------------------------------------------------
@@ -222,6 +224,168 @@ fn b_elliptic_arc_uniform_samples(c: &mut Criterion) {
     }
 }
 
+/// Random query points in the bounding box of the curve, grown by 1 on every side.
+fn projection_queries((lo, hi): (DVec<3>, DVec<3>)) -> Vec<DVec<3>> {
+    let mut rng = SmallRng::seed_from_u64(SEED);
+    (0..NUM_POLYS)
+        .map(|_| {
+            DVec(std::array::from_fn(|i| {
+                rng.random_range(lo[i] - 1.0..hi[i] + 1.0)
+            }))
+        })
+        .collect()
+}
+
+/// Benchmarks `closest_point` and `closest_point_with_param` on the given curve.
+fn b_closest_point(
+    c: &mut Criterion,
+    curve: &str,
+    proj: &Projector<3, F64Adaptor>,
+    queries: &[DVec<3>],
+) {
+    c.bench_function(&format!("closest_point_{curve}"), |b| {
+        let mut i = 0usize;
+        b.iter(|| {
+            black_box(proj.closest_point(black_box(queries[i])));
+            i += 1;
+            if i >= queries.len() {
+                i = 0;
+            }
+        });
+    });
+    c.bench_function(&format!("closest_point_with_param_{curve}"), |b| {
+        let mut i = 0usize;
+        b.iter(|| {
+            black_box(proj.closest_point_with_param(black_box(queries[i])));
+            i += 1;
+            if i >= queries.len() {
+                i = 0;
+            }
+        });
+    });
+}
+
+/// 1M random queries in the bounding box of the curve scaled 10x about its center, as in P2M.
+fn bulk_random_queries((lo, hi): (DVec<3>, DVec<3>)) -> Vec<DVec<3>> {
+    let mut rng = SmallRng::seed_from_u64(SEED);
+    let (mid, half) = ((lo + hi) * 0.5, (hi - lo) * 5.0);
+    (0..1_000_000)
+        .map(|_| {
+            DVec(std::array::from_fn(|i| {
+                mid[i] + half[i] * rng.random_range(-1.0..1.0)
+            }))
+        })
+        .collect()
+}
+
+/// Centers of a 100x100x100 voxel grid over the bounding box of the curve grown by 1 on every
+/// side, in x-major order: neighbouring queries are close together.
+fn bulk_grid_queries((lo, hi): (DVec<3>, DVec<3>)) -> Vec<DVec<3>> {
+    const N: usize = 100;
+    let (lo, size) = (lo - DVec([1.0; 3]), hi - lo + DVec([2.0; 3]));
+    (0..N * N * N)
+        .map(|k| {
+            let idx = [k / (N * N), (k / N) % N, k % N];
+            DVec(std::array::from_fn(|i| {
+                lo[i] + size[i] * (idx[i] as f64 + 0.5) / N as f64
+            }))
+        })
+        .collect()
+}
+
+/// Benchmarks `closest_point_many` on 1M random queries and on a 1M voxel grid.
+fn b_closest_point_many(
+    c: &mut Criterion,
+    curve: &str,
+    proj: &Projector<3, F64Adaptor>,
+    bounds: (DVec<3>, DVec<3>),
+) {
+    let mut group = c.benchmark_group(format!("closest_point_many_{curve}"));
+    group.sample_size(10);
+    for (label, queries) in [
+        ("random", bulk_random_queries(bounds)),
+        ("grid", bulk_grid_queries(bounds)),
+    ] {
+        let mut points = vec![DVec([0.0; 3]); queries.len()];
+        group.throughput(Throughput::Elements(queries.len() as u64));
+        group.bench_function(label, |b| {
+            b.iter(|| {
+                proj.closest_point_many(black_box(&queries), &mut points)
+                    .unwrap();
+                black_box(&points);
+            });
+        });
+    }
+    group.finish();
+}
+
+fn b_closest_points(c: &mut Criterion) {
+    let line = LineSeg3d::create(DVec([-1.0, 0.5, 0.0]), DVec([2.0, -1.0, 1.5]));
+    b_closest_point(
+        c,
+        "line",
+        &Projector::from_line(&line),
+        &projection_queries(line.bounds()),
+    );
+    b_closest_point_many(c, "line", &Projector::from_line(&line), line.bounds());
+    let arc = Arc3d::from_three_points(
+        DVec([-3.5, 0.0, 0.0]),
+        DVec([-3.0, 1.5, 0.0]),
+        DVec([-2.5, 0.0, 0.0]),
+    )
+    .unwrap();
+    b_closest_point(
+        c,
+        "arc",
+        &Projector::from_arc(&arc),
+        &projection_queries(arc.bounds()),
+    );
+    b_closest_point_many(c, "arc", &Projector::from_arc(&arc), arc.bounds());
+    let earc = EllipticArc3d::from_center_start_end(
+        DVec([-3.0, 0.0, 0.0]),
+        DVec([-0.5, 0.3, 0.0]),
+        DVec([-3.2, 1.1, 0.0]),
+        false,
+    )
+    .unwrap();
+    b_closest_point(
+        c,
+        "elliptic_arc",
+        &Projector::from_elliptic_arc(&earc),
+        &projection_queries(earc.bounds()),
+    );
+    b_closest_point_many(
+        c,
+        "elliptic_arc",
+        &Projector::from_elliptic_arc(&earc),
+        earc.bounds(),
+    );
+    // Degree 3, 33 control points: 30 knot spans.
+    let mut rng = SmallRng::seed_from_u64(SEED);
+    let cps: Vec<DVec<3>> = (0..33)
+        .map(|i| {
+            DVec([
+                i as f64 * 0.5,
+                rng.random_range(-2.0..2.0),
+                rng.random_range(-2.0..2.0),
+            ])
+        })
+        .collect();
+    let spline = Spline3d::create_clamped(cps, 3).unwrap();
+    b_closest_point(
+        c,
+        "degree_03_spline_30_segments",
+        &Projector::from_spline(&spline).unwrap(),
+        &projection_queries(spline.bounds()),
+    );
+    b_closest_point_many(
+        c,
+        "degree_03_spline_30_segments",
+        &Projector::from_spline(&spline).unwrap(),
+        spline.bounds(),
+    );
+}
+
 fn benchmarks(c: &mut Criterion) {
     b_root_finding::<4>(c, "degree_03_root_finding");
     b_root_finding::<5>(c, "degree_04_root_finding");
@@ -239,6 +403,7 @@ fn benchmarks(c: &mut Criterion) {
     b_spline_bounds(c);
     b_spline_eval(c);
     b_spline_eval_with_deriv(c);
+    b_closest_points(c);
 }
 
 criterion_group!(benches, benchmarks);
