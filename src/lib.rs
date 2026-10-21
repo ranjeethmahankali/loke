@@ -3,6 +3,7 @@ mod arc;
 mod error;
 mod line;
 mod polynomial;
+mod projector;
 mod spline;
 mod vec;
 
@@ -14,5 +15,6 @@ pub use arc::{
 pub use error::Error;
 pub use line::{LineSeg, LineSeg2d, LineSeg2f, LineSeg3d, LineSeg3f};
 pub use polynomial::{polynomial_roots, polynomial_roots_in_range};
+pub use projector::Projector;
 pub use spline::{Spline, Spline2d, Spline2f, Spline3d, Spline3f};
 pub use vec::{DVec, DVec2, DVec3, F32Adaptor, F64Adaptor, Vec, Vec2, Vec3};

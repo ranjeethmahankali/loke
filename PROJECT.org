@@ -93,6 +93,41 @@
   compare the performance with the special case logic for 2d and 3d arcs. Maybe the generalization
   is just as fast, and I don't need the specializations? Unlikely in 2d, unsure in 3d, very
   interesting to try.
+
+  <2026-10-20 Tue 19:38> Worked out arcs and elliptic arcs. No 2d/3d specializations.
+
+  Arc: frame at the midpoint, m = mid_dir, n = normalize(end_dir - start_dir) (⟂ m by
+  symmetry). With d = q - c, P(ψ) = c + r(cos ψ m + sin ψ n), ψ = θ(t - ½):
+      (P - q)·P' = rθ (d·m sin ψ - d·n cos ψ) = rθρ sin(ψ - ψ*),  ψ* = atan2(d·n, d·m).
+  r² cancels and the out-of-plane part of d drops out. ψ* is the only minimum on the circle,
+  and distance grows with |ψ - ψ*|, so clamping is exact:
+      t = clamp(½ + atan2(d·n, d·m)/θ, 0, 1).
+  If only the point is needed, skip the atan2: inside iff d·m >= cos(θ/2)ρ, ρ = |(d·m, d·n)|,
+  then c + r(d·m m + d·n n)/ρ, else start if d·n < 0, else end.
+
+  Elliptic arc: the same midpoint frame, U = mid_vec, V = tangent(0.5)/θ, and α = θ(t - ½).
+  Cache a = U·U, b = V·V, w = U·V. Per query, du = d·U and dv = d·V. Substituting
+  τ = tan(α/2), (P - q)·P' (1 + τ²)² is the quartic (ascending)
+      [w - dv,  2(b - a + du),  -6w,  2(du - b + a),  w + dv]
+  on τ in [-tan(θ/4), tan(θ/4)]. That range is finite because θ < 2π, so a single window
+  covers the whole arc. Solve with =polynomial_roots_in_range= at the default tolerance
+  (6e-7). Each root gives cos α = (1 - τ²)/(1 + τ²) and sin α = 2τ/(1 + τ²), so no trig per
+  candidate. Compare the roots against both endpoints by squared distance, and call atan
+  only for the winner: t = ½ + 2 atan(τ)/θ.
+
+  How we decided (=benches/closest_point.rs=, f64, 1024 queries):
+  - Arc: the general form costs 13.4 ns/query in 2d and 14.1 ns in 3d. A 2d global-atan2
+    version, a 2d perp(m) version and a 3d normal/cross version all came in within ±2%:
+    atan2 dominates. Caching n bought nothing either. The trig-free point costs 3.7 ns (2d)
+    and 5.5 ns (3d). Against brute force (dense samples plus golden section) in 2d, 3d and
+    5d, the worst excess distance was 4e-14 relative.
+  - Elliptic arc: ~100 ns/query at θ = 2, ~200 ns at θ = 5. Splitting into two half
+    windows (|τ| <= 1) was 10-20% slower, and no more accurate. Tightening the tolerance to
+    1e-10 or 1e-14 was 20-95% slower, and no more accurate: the last Newton step already
+    lands far inside the tolerance. Over moderate, 100:1 and near-full-turn arcs, the worst
+    excess distance was 4e-15 relative, and the worst sin(angle(P - q, P')) at interior
+    results was 1e-10. Near a full turn (θ > 2π - 1e-4) the error is ~5e-11, which comes
+    from =point()= itself (it divides by sin(θ/2)), not from the projection.
 * TODO Implement Polycurves
   :PROPERTIES:
   :CREATED:  2026-06-06 Sat 16:36
