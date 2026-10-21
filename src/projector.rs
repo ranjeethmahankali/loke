@@ -19,14 +19,13 @@ enum SegmentProjector<const DIM: usize, A: Adaptor<DIM>> {
 
         We store one offset per dimension. From those offsets, we read coefficients, and use them as polynomials.
          */
-        degree: usize,                                  // Of the original spline.
-        position_dot_deriv_coeff_offsets: [usize; DIM], // Offsets to coefficients of degree = (2 * degree - 1) polynomial.
-        deriv_coeff_offsets: [usize; DIM], // Offsets to coefficients of degree = degree - 1 polynomial.
+        degree: usize,                          // Of the original spline.
+        position_dot_deriv_coeff_offset: usize, // Offset to 2 * p polynomial coefficients.
+        deriv_coeff_offset: [usize; DIM],       // Offsets to `n = degree` polynomial coefficients.
+        position_coeff_offset: [usize; DIM],    // Offsets to p + 1 polynomial coefficients.
     },
     Line {
         // TODO: Just cache the end points, and use them to compute the closest point.
-        start: A::Vector,
-        end: A::Vector,
     },
     Arc {
         // TODO: Do it per the task plan in PROJECT.org.
@@ -40,13 +39,26 @@ enum SegmentProjector<const DIM: usize, A: Adaptor<DIM>> {
     },
 }
 
+struct SegmentInfo<const DIM: usize, A: Adaptor<DIM>> {
+    projector: SegmentProjector<DIM, A>,
+    start: A::Vector,
+    end: A::Vector,
+    // TODO: To start, we should just iterate over all segments, but later we can think about using a BVH.
+    bounds_min: A::Vector,
+    bounds_max: A::Vector,
+}
+
 // TODO: In the future we will have a polycurve type. So this projector needs to work over arbitrary
 // collections of segments. We should also break up the spline segments and flatten those into a
 // single list with arcs, and lines etc all together.
 
 pub struct Projector<const DIM: usize, A: Adaptor<DIM>> {
-    // TODO: To start, we should just iterate over all segments, but later we can think about using a BVH.
-    segment_bounds: Box<[(A::Vector, A::Vector)]>,
     polynomial_coefficients: Box<[A::Scalar]>,
-    projectors: Box<[SegmentProjector<DIM, A>]>,
+    infos: Box<[SegmentInfo<DIM, A>]>,
+}
+
+impl<const DIM: usize, A: Adaptor<DIM>> Projector<DIM, A> {
+    // TODO: Add constructor functions for each curve type. from_xxx convention.
+
+    // TODO: `project` function takes a A::Vector and returns the same after projecting.
 }
