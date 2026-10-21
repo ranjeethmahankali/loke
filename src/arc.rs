@@ -20,12 +20,12 @@ pub struct Arc<const DIM: usize, A>
 where
     A: Adaptor<DIM>,
 {
-    center: A::Vector,
-    start_dir: A::Vector, // Unit vector from center toward start.
-    mid_dir: A::Vector,   // Unit vector from center toward midpoint (used for antipodal SLERP).
-    end_dir: A::Vector,   // Unit vector from center toward end.
-    radius: A::Scalar,
-    angle: A::Scalar, // Sweep angle from start to end through mid.
+    pub(crate) center: A::Vector,
+    pub(crate) start_dir: A::Vector, // Unit vector from center toward start.
+    pub(crate) mid_dir: A::Vector, // Unit vector from center toward midpoint (used for antipodal SLERP).
+    pub(crate) end_dir: A::Vector, // Unit vector from center toward end.
+    pub(crate) radius: A::Scalar,
+    pub(crate) angle: A::Scalar, // Sweep angle from start to end through mid.
 }
 
 #[derive(Clone, Debug)]
@@ -33,13 +33,13 @@ pub struct EllipticArc<const DIM: usize, A>
 where
     A: Adaptor<DIM>,
 {
-    center: A::Vector,
-    start_vec: A::Vector, // Vector from center toward start.
-    mid_vec: A::Vector,   // Vector from center toward midpoint (used for antipodal SLERP).
-    end_vec: A::Vector,   // Vector from center toward end.
+    pub(crate) center: A::Vector,
+    pub(crate) start_vec: A::Vector, // Vector from center toward start.
+    pub(crate) mid_vec: A::Vector, // Vector from center toward midpoint (used for antipodal SLERP).
+    pub(crate) end_vec: A::Vector, // Vector from center toward end.
     /// Sweep of the *parameter* angle, not the visible angle between `start_vec` and `end_vec`
     /// (the two agree only for circles). See ELLIPSE ARC MATH §1 above the `impl`.
-    angle: A::Scalar,
+    pub(crate) angle: A::Scalar,
 }
 
 impl<const DIM: usize, A> Arc<DIM, A>

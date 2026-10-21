@@ -335,7 +335,7 @@ where
         self.start() == self.end()
     }
 
-    fn power_basis_polynomial(&self, segment: usize, coord: usize) -> &[A::Scalar] {
+    pub(crate) fn power_basis_polynomial(&self, segment: usize, coord: usize) -> &[A::Scalar] {
         /*
         The power basis coeffients are stored in the following order:
         - The coefficients of the x polynomial of the first segment.
@@ -355,6 +355,11 @@ where
         let n_coeff = self.degree() + 1;
         let offset = (n_coeff * n_segs * coord) + (n_coeff * segment);
         &self.power_basis_coeff[offset..(offset + n_coeff)]
+    }
+
+    /// Number of non-empty knot spans, each with its own power basis polynomial.
+    pub(crate) fn num_segments(&self) -> usize {
+        self.unique_knots.len() - 1
     }
 
     pub fn serialize(&self, mut w: impl std::io::Write) -> Result<(), std::io::Error>
