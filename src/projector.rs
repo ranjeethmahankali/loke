@@ -228,38 +228,63 @@ impl<const DIM: usize, A: Adaptor<DIM> + TrigonometryAdaptor> Projector<DIM, A> 
 
     /// The closest point on the segment to `q`.
     ///
-    /// Lines and arcs are inlined all the way into the caller, and the heavy cases are calls.
-    /// Otherwise `q` and the result go through memory at every call boundary, and that chain
-    /// of store forwards makes a line projection several times slower.
+    /// Inlined all the way into the caller. Otherwise `q` and the result go through memory at
+    /// every call boundary, and that chain of store forwards makes a line projection several
+    /// times slower.
     #[inline(always)]
-    fn project_segment(&self, info: &SegmentInfo<DIM, A>, q: A::Vector) -> A::Vector {
-        match &info.projector {
+    fn project_segment(&self, seg_info: &SegmentInfo<DIM, A>, q: A::Vector) -> A::Vector {
+        match &seg_info.projector {
             SegmentProjector::Polynomial {
                 degree,
                 position_dot_deriv_coeff_offset,
                 deriv_coeff_offset,
                 position_coeff_offset,
-            } => self.project_polynomial(
-                *degree,
-                *position_dot_deriv_coeff_offset,
-                deriv_coeff_offset,
-                position_coeff_offset,
-                info,
-                q,
-            ),
+            } => {
+                let degree = *degree;
+                let all = &self.polynomial_coefficients;
+                let n_coeff = 2 * degree;
+                let mut coef = [A::scalar(0.0); MAX_COEFFS];
+                let coef = &mut coef[..n_coeff];
+                coef.copy_from_slice(&all[*position_dot_deriv_coeff_offset..][..n_coeff]);
+                for (ci, &offset) in deriv_coeff_offset.iter().enumerate() {
+                    let qi = A::vector_coord(q, ci);
+                    for (c, &d) in coef.iter_mut().zip(&all[offset..offset + degree]) {
+                        *c -= qi * d;
+                    }
+                }
+                let mut roots = [A::scalar(0.0); MAX_COEFFS];
+                let n_roots = polynomial::polynomial_roots_in_range::<A>(
+                    coef,
+                    &mut roots,
+                    A::scalar(0.0),
+                    A::scalar(1.0),
+                    A::scalar(ROOT_TOLERANCE),
+                )
+                .expect("INTERNAL ERROR: Degree is checked on construction");
+                let mut best =
+                    closer::<DIM, A>(q, start_candidate::<DIM, A>(q, seg_info), seg_info.end);
+                for &t in &roots[..n_roots] {
+                    let p = A::vector(std::array::from_fn(|ci| {
+                        let offset = position_coeff_offset[ci];
+                        polynomial::eval::<A>(&all[offset..offset + degree + 1], t)
+                    }));
+                    best = closer::<DIM, A>(q, best, p);
+                }
+                best.1
+            }
             SegmentProjector::Line => {
-                let dir = info.end - info.start;
+                let dir = seg_info.end - seg_info.start;
                 let len_sq = A::vector_length_sq(dir);
                 let t = if len_sq > A::scalar(0.0) {
                     A::clamp(
-                        A::dot_product(q - info.start, dir) / len_sq,
+                        A::dot_product(q - seg_info.start, dir) / len_sq,
                         A::scalar(0.0),
                         A::scalar(1.0),
                     )
                 } else {
                     A::scalar(0.0)
                 };
-                info.start + dir * t
+                seg_info.start + dir * t
             }
             SegmentProjector::Arc {
                 center,
@@ -268,6 +293,10 @@ impl<const DIM: usize, A: Adaptor<DIM> + TrigonometryAdaptor> Projector<DIM, A> 
                 radius,
                 cos_half,
             } => {
+                // TODO: We need a variant of projection that returns the parameter value too. We
+                // might need to bring back the atan2. We can have two codepaths, or just go with
+                // the atan2. What is the comparison with and without atan2?
+
                 // The distance grows with the angle from the direction of d in the plane, and
                 // the arc is symmetric about m, so outside the sweep the nearer end is on the
                 // side of d·n.
@@ -277,9 +306,9 @@ impl<const DIM: usize, A: Adaptor<DIM> + TrigonometryAdaptor> Projector<DIM, A> 
                 if rho > A::scalar(0.0) && dm >= *cos_half * rho {
                     *center + (*m * dm + *n * dn) * (*radius / rho)
                 } else if dn < A::scalar(0.0) {
-                    info.start
+                    seg_info.start
                 } else {
-                    info.end
+                    seg_info.end
                 }
             }
             SegmentProjector::EllipticArc {
@@ -289,90 +318,36 @@ impl<const DIM: usize, A: Adaptor<DIM> + TrigonometryAdaptor> Projector<DIM, A> 
                 b_minus_a,
                 w,
                 tau_max,
-            } => Self::project_elliptic_arc(*center, *u, *v, *b_minus_a, *w, *tau_max, info, q),
-        }
-    }
-
-    #[inline(never)]
-    #[allow(clippy::too_many_arguments)]
-    fn project_polynomial(
-        &self,
-        degree: usize,
-        position_dot_deriv_coeff_offset: usize,
-        deriv_coeff_offset: &[usize; DIM],
-        position_coeff_offset: &[usize; DIM],
-        info: &SegmentInfo<DIM, A>,
-        q: A::Vector,
-    ) -> A::Vector {
-        let all = &self.polynomial_coefficients;
-        let n_coeff = 2 * degree;
-        let mut coef = [A::scalar(0.0); MAX_COEFFS];
-        let coef = &mut coef[..n_coeff];
-        coef.copy_from_slice(&all[position_dot_deriv_coeff_offset..][..n_coeff]);
-        for (ci, &offset) in deriv_coeff_offset.iter().enumerate() {
-            let qi = A::vector_coord(q, ci);
-            for (c, &d) in coef.iter_mut().zip(&all[offset..offset + degree]) {
-                *c -= qi * d;
+            } => {
+                let d = q - *center;
+                let (du, dv) = (A::dot_product(d, *u), A::dot_product(d, *v));
+                let two = A::scalar(2.0);
+                let coef = [
+                    *w - dv,
+                    two * (*b_minus_a + du),
+                    A::scalar(-6.0) * *w,
+                    two * (du - *b_minus_a),
+                    *w + dv,
+                ];
+                let mut roots = [A::scalar(0.0); 4];
+                let n_roots = polynomial::polynomial_roots_in_range::<A>(
+                    &coef,
+                    &mut roots,
+                    -*tau_max,
+                    *tau_max,
+                    A::scalar(ROOT_TOLERANCE),
+                )
+                .expect("INTERNAL ERROR: A quartic is always supported");
+                let mut best =
+                    closer::<DIM, A>(q, start_candidate::<DIM, A>(q, seg_info), seg_info.end);
+                for &tau in &roots[..n_roots] {
+                    let k = A::scalar(1.0) / (A::scalar(1.0) + tau * tau);
+                    let (cos_a, sin_a) = ((A::scalar(1.0) - tau * tau) * k, two * tau * k);
+                    best = closer::<DIM, A>(q, best, *center + *u * cos_a + *v * sin_a);
+                }
+                best.1
             }
         }
-        let mut roots = [A::scalar(0.0); MAX_COEFFS];
-        let n_roots = polynomial::polynomial_roots_in_range::<A>(
-            coef,
-            &mut roots,
-            A::scalar(0.0),
-            A::scalar(1.0),
-            A::scalar(ROOT_TOLERANCE),
-        )
-        .expect("INTERNAL ERROR: Degree is checked on construction");
-        let mut best = closer::<DIM, A>(q, start_candidate::<DIM, A>(q, info), info.end);
-        for &t in &roots[..n_roots] {
-            let p = A::vector(std::array::from_fn(|ci| {
-                let offset = position_coeff_offset[ci];
-                polynomial::eval::<A>(&all[offset..offset + degree + 1], t)
-            }));
-            best = closer::<DIM, A>(q, best, p);
-        }
-        best.1
-    }
-
-    #[inline(never)]
-    #[allow(clippy::too_many_arguments)]
-    fn project_elliptic_arc(
-        center: A::Vector,
-        u: A::Vector,
-        v: A::Vector,
-        b_minus_a: A::Scalar,
-        w: A::Scalar,
-        tau_max: A::Scalar,
-        info: &SegmentInfo<DIM, A>,
-        q: A::Vector,
-    ) -> A::Vector {
-        let d = q - center;
-        let (du, dv) = (A::dot_product(d, u), A::dot_product(d, v));
-        let two = A::scalar(2.0);
-        let coef = [
-            w - dv,
-            two * (b_minus_a + du),
-            A::scalar(-6.0) * w,
-            two * (du - b_minus_a),
-            w + dv,
-        ];
-        let mut roots = [A::scalar(0.0); 4];
-        let n_roots = polynomial::polynomial_roots_in_range::<A>(
-            &coef,
-            &mut roots,
-            -tau_max,
-            tau_max,
-            A::scalar(ROOT_TOLERANCE),
-        )
-        .expect("INTERNAL ERROR: A quartic is always supported");
-        let mut best = closer::<DIM, A>(q, start_candidate::<DIM, A>(q, info), info.end);
-        for &tau in &roots[..n_roots] {
-            let k = A::scalar(1.0) / (A::scalar(1.0) + tau * tau);
-            let (cos_a, sin_a) = ((A::scalar(1.0) - tau * tau) * k, two * tau * k);
-            best = closer::<DIM, A>(q, best, center + u * cos_a + v * sin_a);
-        }
-        best.1
     }
 }
 
