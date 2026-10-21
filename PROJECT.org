@@ -128,6 +128,16 @@
     excess distance was 4e-15 relative, and the worst sin(angle(P - q, P')) at interior
     results was 1e-10. Near a full turn (θ > 2π - 1e-4) the error is ~5e-11, which comes
     from =point()= itself (it divides by sin(θ/2)), not from the projection.
+
+** TODO Think about alternative ways to find closest points
+   :PROPERTIES:
+   :CREATED:  2026-10-21 Wed 09:49
+   :END:
+
+   There is newer research, such as: [[id:fe40e404-a625-4775-8825-ec57932635a2][P2M: Closest Point On Mesh Algo]], that can help write even
+   faster, bulk query friendly, SIMD friendly algorithms, that are very different (rewrite) from
+   what we have today.
+
 * TODO Implement Polycurves
   :PROPERTIES:
   :CREATED:  2026-06-06 Sat 16:36
